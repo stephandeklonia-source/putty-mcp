@@ -1,0 +1,26 @@
+[putty]
+# Auto-detected if empty. Set to PuTTY install directory.
+executable_path = ""
+# Set false to disable Windows Registry session tools
+enable_registry = true
+
+[defaults]
+protocol = "ssh"
+port = 22
+
+[serial]
+# Default serial settings
+baud = 9600
+data_bits = 8
+parity = "n"
+stop_bits = 1
+flow_control = "N"
+
+[sessions]
+max_concurrent = 10
+timeout_seconds = 3600
+buffer_lines = 1000
+
+[logging]
+enabled = true
+level = "INFO"

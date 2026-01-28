@@ -1,0 +1,14 @@
+[project]
+name = "putty-mcp"
+version = "1.0.0"
+description = "MCP server exposing the full PuTTY toolchain"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "pydantic>=2.0.0",
+    "tomli>=2.0.0;python_version<'3.11'",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"

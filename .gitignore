@@ -1,0 +1,25 @@
+# Keys - never commit
+keys/
+*.ppk
+*.pem
+*.key
+
+# Config (may contain local paths)
+config.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# PuTTY decompiled help (large, regenerable)
+help_decompiled/
+
+# Logs
+*.log
+
+# OS
+nul
+Thumbs.db
+Desktop.ini
