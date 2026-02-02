@@ -16,6 +16,12 @@ __pycache__/
 # PuTTY decompiled help (large, regenerable)
 help_decompiled/
 
+# Environment
+.env
+
+# Project notes (local-specific)
+CLAUDE.md
+
 # Logs
 *.log
 
