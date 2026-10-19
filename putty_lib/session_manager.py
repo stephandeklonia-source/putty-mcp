@@ -24,6 +24,7 @@ class InteractiveSession:
     protocol: str
     created_at: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    last_activity: float = field(default_factory=time.time)
 
     _buffer: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
@@ -57,9 +58,11 @@ class InteractiveSession:
             raise RuntimeError("Session process has exited")
         self.process.stdin.write(text)
         self.process.stdin.flush()
+        self.last_activity = time.time()
 
     def read(self, last_n: int | None = None, clear: bool = False) -> list[str]:
         """Read output buffer. Optionally return only last N lines and/or clear."""
+        self.last_activity = time.time()
         with self._lock:
             if last_n:
                 lines = list(self._buffer)[-last_n:]
@@ -76,6 +79,10 @@ class InteractiveSession:
     @property
     def age_seconds(self) -> float:
         return time.time() - self.created_at
+
+    @property
+    def idle_seconds(self) -> float:
+        return time.time() - self.last_activity
 
     def close(self) -> None:
         """Gracefully close the session."""
@@ -165,6 +172,7 @@ class SessionManager:
                     "protocol": s.protocol,
                     "alive": s.alive,
                     "age_seconds": round(s.age_seconds, 1),
+                    "idle_seconds": round(s.idle_seconds, 1),
                     **s.metadata,
                 }
                 for s in self._sessions.values()
@@ -183,16 +191,17 @@ class SessionManager:
         """Remove sessions whose process has exited (called with lock held)."""
         dead = [sid for sid, s in self._sessions.items() if not s.alive]
         for sid in dead:
-            self._sessions.pop(sid, None)
+            # Process already exited, so close() only releases the pipes
+            self._sessions.pop(sid).close()
 
     def _cleanup_loop(self) -> None:
-        """Periodically close timed-out sessions."""
+        """Periodically close sessions idle for longer than timeout_seconds."""
         while not self._stop_event.wait(60):
             with self._lock:
                 timed_out = [
                     sid
                     for sid, s in self._sessions.items()
-                    if s.age_seconds > self.timeout_seconds
+                    if s.idle_seconds > self.timeout_seconds
                 ]
             for sid in timed_out:
                 log.info("Session %s timed out, closing", sid)

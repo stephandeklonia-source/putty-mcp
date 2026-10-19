@@ -10,7 +10,6 @@ from __future__ import annotations
 import atexit
 import logging
 import time
-from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 
@@ -23,17 +22,21 @@ from putty_lib.utils import (
     build_connection_args,
     build_proxy_chain,
     build_serial_args,
-    parse_host_string,
 )
 
 # ---------------------------------------------------------------------------
 # Initialize
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
+config = PuTTYConfig.load()
+
+# Logs go to stderr; stdout is reserved for the MCP stdio transport
+logging.basicConfig(
+    level=config.log_level.upper() if config.log_enabled else logging.WARNING,
+    format="%(name)s %(levelname)s: %(message)s",
+)
 log = logging.getLogger("putty-mcp")
 
-config = PuTTYConfig.load()
 executor = PuTTYExecutor(config)
 sessions = SessionManager(
     max_concurrent=config.sessions.max_concurrent,
@@ -59,7 +62,7 @@ def _shutdown() -> None:
 @mcp.tool()
 def putty_open(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -119,7 +122,7 @@ def putty_serial(
 def plink_exec(
     host: str,
     command: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -151,7 +154,7 @@ def plink_exec(
 def plink_script(
     host: str,
     script_path: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -170,15 +173,14 @@ def plink_script(
         proxy_command=proxy_command, batch_mode=True,
     )
     # Insert -m before the host arg
-    args.insert(-1, "-m")
-    args.insert(-1, script_path)
+    args[-1:-1] = ["-m", script_path]
     return executor.run("plink", args, timeout=timeout)
 
 
 @mcp.tool()
 def plink_tunnel(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -200,10 +202,10 @@ def plink_tunnel(
         dynamic_forwards=dynamic_forwards, proxy_command=proxy_command,
         batch_mode=True,
     )
-    if nc_destination:
-        args.extend(["-nc", nc_destination])
-    else:
-        args.append("-N")  # No command, just tunnel
+    # Options must precede the host: plink treats everything after it
+    # as the remote command.
+    extra = ["-nc", nc_destination] if nc_destination else ["-N"]  # -N: no shell, just tunnel
+    args[-1:-1] = extra
 
     proc = executor.spawn("plink", args)
     session = sessions.create(
@@ -231,7 +233,7 @@ def plink_tunnel(
 @mcp.tool()
 def session_open(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -245,9 +247,13 @@ def session_open(
     proxy_command: str | None = None,
     serial_config: str | None = None,
 ) -> dict:
-    """Open a persistent interactive plink session (SSH/Telnet/serial/raw). Returns session_id."""
-    if protocol == "serial" and serial_config:
-        parts = serial_config.split(",")
+    """Open a persistent interactive plink session (SSH/Telnet/serial/raw). Returns session_id.
+
+    For serial, host is the port (e.g. COM3) and serial_config is
+    "baud,data_bits,parity,stop_bits,flow" (omitted fields use config defaults).
+    """
+    if protocol == "serial":
+        parts = [p.strip() for p in serial_config.split(",")] if serial_config else []
         args = build_serial_args(
             host,
             baud=int(parts[0]) if len(parts) > 0 else config.serial.baud,
@@ -333,12 +339,34 @@ def session_close(session_id: str) -> dict:
 # ===================================================================
 
 
+def _transfer_args(
+    port: int | None,
+    key_file: str | None,
+    session_name: str | None,
+    host_keys: list[str] | None,
+    use_pageant: bool,
+) -> list[str]:
+    """Connection args shared by pscp and psftp."""
+    args: list[str] = []
+    if key_file:
+        args.extend(["-i", key_file])
+    if session_name:
+        args.extend(["-load", session_name])
+    if host_keys:
+        for hk in host_keys:
+            args.extend(["-hostkey", hk])
+    args.append("-agent" if use_pageant else "-noagent")
+    if port is not None:
+        args.extend(["-P", str(port)])
+    return args
+
+
 @mcp.tool()
 def pscp_upload(
     local_path: str,
     remote_path: str,
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -359,18 +387,7 @@ def pscp_upload(
         args.append("-sftp")
     elif force_protocol == "scp":
         args.append("-scp")
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     # Source and destination
     args.append(local_path)
@@ -385,7 +402,7 @@ def pscp_download(
     remote_path: str,
     local_path: str,
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -406,18 +423,7 @@ def pscp_download(
         args.append("-sftp")
     elif force_protocol == "scp":
         args.append("-scp")
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     remote = f"{username}@{host}:{remote_path}" if username else f"{host}:{remote_path}"
     args.append(remote)
@@ -430,7 +436,7 @@ def pscp_download(
 def pscp_list(
     remote_path: str,
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -440,18 +446,7 @@ def pscp_list(
 ) -> dict:
     """List remote directory via pscp -ls."""
     args: list[str] = ["-batch", "-ls"]
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     remote = f"{username}@{host}:{remote_path}" if username else f"{host}:{remote_path}"
     args.append(remote)
@@ -463,7 +458,7 @@ def pscp_list(
 def psftp_batch(
     host: str,
     commands: list[str],
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -479,18 +474,7 @@ def psftp_batch(
     args: list[str] = ["-batch"]
     if continue_on_error:
         args.append("-be")
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     target = f"{username}@{host}" if username else host
     args.append(target)
@@ -502,7 +486,7 @@ def psftp_batch(
 @mcp.tool()
 def psftp_interactive(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -510,19 +494,7 @@ def psftp_interactive(
     use_pageant: bool = True,
 ) -> dict:
     """Open a persistent PSFTP session for multi-step SFTP workflows. Returns session_id."""
-    args: list[str] = []
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
 
     target = f"{username}@{host}" if username else host
     args.append(target)
@@ -596,7 +568,8 @@ def keygen_convert(
     """Convert/export a key to a different format.
 
     output_format: RFC4716, PKCS8, PEM, PPK
-    PPK conversion is done natively (no GUI needed).
+    RFC4716/PKCS8/PEM export the public key (ssh-keygen -e).
+    PPK converts the (unencrypted) private key natively (no GUI needed).
     """
     if output_format.upper() == "PPK":
         try:
@@ -606,6 +579,8 @@ def keygen_convert(
             return {"success": False, "error": str(e)}
 
     args = ["-e", "-f", input_path, "-m", output_format]
+    if passphrase:
+        args.extend(["-P", passphrase])
     result = executor.run("ssh-keygen", args, timeout=10)
     if result["success"] and output_path:
         try:
@@ -761,7 +736,7 @@ def saved_session_delete(session_name: str) -> dict:
 @mcp.tool()
 def test_connection(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -858,7 +833,10 @@ def chain_exec(
     jump_hosts: list of "user@host:port" strings in hop order.
     Builds nested plink -proxycmd chain automatically.
     """
-    proxy_cmd = build_proxy_chain(jump_hosts, target_host, target_port)
+    try:
+        proxy_cmd = build_proxy_chain(jump_hosts)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     args = build_connection_args(
         host=target_host, port=target_port, username=target_username,
         protocol="ssh", key_file=key_file, proxy_command=proxy_cmd,
@@ -875,5 +853,9 @@ def chain_exec(
 # Entry point
 # ===================================================================
 
-if __name__ == "__main__":
+def main() -> None:
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

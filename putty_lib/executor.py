@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from pathlib import Path
 from typing import Any
 
 from putty_lib.config import PuTTYConfig
 
 log = logging.getLogger(__name__)
+
+# Flags whose following argument is a secret and must not be logged
+_SECRET_FLAGS: dict[str, set[str]] = {"ssh-keygen": {"-N", "-P"}}
+
+
+def _loggable(tool: str, cmd: list[str]) -> str:
+    secret_flags = _SECRET_FLAGS.get(tool, set())
+    out: list[str] = []
+    hide_next = False
+    for part in cmd:
+        out.append("***" if hide_next else part)
+        hide_next = part in secret_flags
+    return " ".join(out)
 
 
 class PuTTYExecutor:
@@ -33,7 +45,12 @@ class PuTTYExecutor:
         """
         exe = self.config.get_exe(tool)
         cmd = [str(exe)] + args
-        log.info("run: %s", " ".join(cmd))
+        log.info("run: %s", _loggable(tool, cmd))
+
+        # Never let the child inherit our stdin: over stdio transport it is
+        # the MCP protocol stream, and plink/ssh-keygen would consume it.
+        if input_text is None:
+            kwargs.setdefault("stdin", subprocess.DEVNULL)
 
         try:
             result = subprocess.run(
@@ -79,16 +96,20 @@ class PuTTYExecutor:
         args: list[str],
         **kwargs: Any,
     ) -> subprocess.Popen:
-        """Spawn a long-running PuTTY process. Returns the Popen handle."""
+        """Spawn a long-running PuTTY process. Returns the Popen handle.
+
+        stderr is merged into stdout so errors (auth failures, host key
+        problems) show up in the session buffer and the pipe can't fill up.
+        """
         exe = self.config.get_exe(tool)
         cmd = [str(exe)] + args
-        log.info("spawn: %s", " ".join(cmd))
+        log.info("spawn: %s", _loggable(tool, cmd))
 
         return subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             shell=False,
             **kwargs,
@@ -101,7 +122,7 @@ class PuTTYExecutor:
         """
         exe = self.config.get_exe(tool)
         cmd = [str(exe)] + args
-        log.info("launch_gui: %s", " ".join(cmd))
+        log.info("launch_gui: %s", _loggable(tool, cmd))
 
         try:
             proc = subprocess.Popen(

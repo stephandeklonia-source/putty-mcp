@@ -24,8 +24,19 @@ def _check_available() -> None:
 
 
 def _encode_session_name(name: str) -> str:
-    """PuTTY URL-encodes session names in the registry."""
-    return urllib.parse.quote(name, safe="")
+    """Escape a session name the way PuTTY does (mungestr in winstore.c).
+
+    Only space, backslash, '*', '?', '%', non-printable/non-ASCII bytes and
+    a leading '.' are %XX-escaped; everything else (e.g. '@', ':') is kept.
+    """
+    out: list[str] = []
+    for i, byte in enumerate(name.encode("utf-8")):
+        ch = chr(byte)
+        if ch in " \\*?%" or byte < 0x20 or byte > 0x7E or (ch == "." and i == 0):
+            out.append(f"%{byte:02X}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _decode_session_name(encoded: str) -> str:
@@ -71,16 +82,15 @@ def list_sessions() -> list[str]:
     _check_available()
     sessions: list[str] = []
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _SESSIONS_KEY)  # type: ignore[name-defined]
-        i = 0
-        while True:
-            try:
-                name = winreg.EnumKey(key, i)  # type: ignore[name-defined]
-                sessions.append(_decode_session_name(name))
-                i += 1
-            except OSError:
-                break
-        winreg.CloseKey(key)  # type: ignore[name-defined]
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _SESSIONS_KEY) as key:  # type: ignore[name-defined]
+            i = 0
+            while True:
+                try:
+                    name = winreg.EnumKey(key, i)  # type: ignore[name-defined]
+                    sessions.append(_decode_session_name(name))
+                    i += 1
+                except OSError:
+                    break
     except OSError:
         pass
     return sessions
@@ -92,18 +102,17 @@ def get_session(name: str) -> dict[str, Any]:
     encoded = _encode_session_name(name)
     result: dict[str, Any] = {"session_name": name}
     try:
-        key = winreg.OpenKey(  # type: ignore[name-defined]
+        with winreg.OpenKey(  # type: ignore[name-defined]
             winreg.HKEY_CURRENT_USER, f"{_SESSIONS_KEY}\\{encoded}"  # type: ignore[name-defined]
-        )
-        i = 0
-        while True:
-            try:
-                val_name, val_data, val_type = winreg.EnumValue(key, i)  # type: ignore[name-defined]
-                result[val_name] = val_data
-                i += 1
-            except OSError:
-                break
-        winreg.CloseKey(key)  # type: ignore[name-defined]
+        ) as key:
+            i = 0
+            while True:
+                try:
+                    val_name, val_data, _ = winreg.EnumValue(key, i)  # type: ignore[name-defined]
+                    result[val_name] = val_data
+                    i += 1
+                except OSError:
+                    break
     except OSError as e:
         raise KeyError(f"Session '{name}' not found") from e
     return result
@@ -119,31 +128,29 @@ def create_session(name: str, **params: Any) -> dict[str, Any]:
     encoded = _encode_session_name(name)
     key_path = f"{_SESSIONS_KEY}\\{encoded}"
 
-    key = winreg.CreateKey(  # type: ignore[name-defined]
-        winreg.HKEY_CURRENT_USER, key_path  # type: ignore[name-defined]
-    )
-
     written: dict[str, Any] = {}
-    for param_name, value in params.items():
-        if param_name in _PARAM_TO_REG:
-            reg_name, reg_type = _PARAM_TO_REG[param_name]
-            # Convert booleans to int for registry
-            if isinstance(value, bool):
-                value = int(value)
-            if reg_type is int:
-                winreg.SetValueEx(key, reg_name, 0, winreg.REG_DWORD, int(value))  # type: ignore[name-defined]
+    with winreg.CreateKey(  # type: ignore[name-defined]
+        winreg.HKEY_CURRENT_USER, key_path  # type: ignore[name-defined]
+    ) as key:
+        for param_name, value in params.items():
+            if param_name in _PARAM_TO_REG:
+                reg_name, reg_type = _PARAM_TO_REG[param_name]
+                # Convert booleans to int for registry
+                if isinstance(value, bool):
+                    value = int(value)
+                if reg_type is int:
+                    winreg.SetValueEx(key, reg_name, 0, winreg.REG_DWORD, int(value))  # type: ignore[name-defined]
+                else:
+                    winreg.SetValueEx(key, reg_name, 0, winreg.REG_SZ, str(value))  # type: ignore[name-defined]
+                written[reg_name] = value
             else:
-                winreg.SetValueEx(key, reg_name, 0, winreg.REG_SZ, str(value))  # type: ignore[name-defined]
-            written[reg_name] = value
-        else:
-            # Direct registry value name — pass through
-            if isinstance(value, int):
-                winreg.SetValueEx(key, param_name, 0, winreg.REG_DWORD, value)  # type: ignore[name-defined]
-            else:
-                winreg.SetValueEx(key, param_name, 0, winreg.REG_SZ, str(value))  # type: ignore[name-defined]
-            written[param_name] = value
+                # Direct registry value name — pass through
+                if isinstance(value, int):
+                    winreg.SetValueEx(key, param_name, 0, winreg.REG_DWORD, int(value))  # type: ignore[name-defined]
+                else:
+                    winreg.SetValueEx(key, param_name, 0, winreg.REG_SZ, str(value))  # type: ignore[name-defined]
+                written[param_name] = value
 
-    winreg.CloseKey(key)  # type: ignore[name-defined]
     return {"session_name": name, "values_written": written}
 
 

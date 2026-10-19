@@ -36,7 +36,7 @@ def parse_host_string(host_string: str) -> dict[str, Any]:
 
 def build_connection_args(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -135,8 +135,9 @@ def build_connection_args(
         }.get(log_type or "session", "-sessionlog")
         args.extend([log_flag, log_file])
 
-    # Port (non-serial)
-    if protocol != "serial":
+    # Port (non-serial). Omitted when None so PuTTY uses the protocol's
+    # default port, or the port stored in a loaded saved session.
+    if port is not None and protocol != "serial":
         args.extend(["-P", str(port)])
 
     # Username
@@ -184,63 +185,36 @@ def build_forward_args(
     return args
 
 
-def build_proxy_chain(jump_hosts: list[str], target_host: str, target_port: int = 22) -> str:
+_UNSAFE_PROXY_CHARS = re.compile(r'[\s"\'`;&|<>$^%]')
+
+
+def build_proxy_chain(jump_hosts: list[str]) -> str:
     """Build nested -proxycmd string for multi-hop SSH.
 
-    jump_hosts: list of "user@host:port" strings in order.
-    Returns the -proxycmd value for the outermost plink call.
+    jump_hosts: list of "user@host:port" strings in hop order.
+    Returns the -proxycmd value for the outermost plink call. The last
+    jump connects to PuTTY's %host:%port placeholders (the final target).
+
+    For 2 jumps [j1, j2]:
+      cmd1 = plink -batch j1 -nc j2_host:j2_port
+      cmd2 = plink -proxycmd "cmd1" -batch j2 -nc %host:%port
     """
     if not jump_hosts:
         return ""
 
-    # Build from innermost (first jump) to outermost
-    # Each layer: plink -batch [user@]host [-P port] -nc next_host:next_port
-    # The outermost layer uses %host:%port placeholders for the final target
+    for jh in jump_hosts:
+        # The chain is a single command string (run via a shell on Unix),
+        # so refuse anything that could break out of it.
+        if not jh or _UNSAFE_PROXY_CHARS.search(jh):
+            raise ValueError(f"Invalid jump host: {jh!r}")
 
-    # Parse all jumps
     parsed = [parse_host_string(jh) for jh in jump_hosts]
 
-    # Start with the innermost jump connecting to the next hop
-    # For a single jump: plink -batch user@jump -nc %host:%port
-    # For two jumps:     plink -proxycmd "plink -batch user@j1 -nc j2:22" -batch user@j2 -nc %host:%port
-
-    def _build_cmd(jump_idx: int, dest_host: str, dest_port: int, inner_proxy: str | None = None) -> str:
-        j = parsed[jump_idx]
-        parts = ["plink", "-batch"]
-        if inner_proxy:
-            # Escape quotes for nesting
-            parts.extend(["-proxycmd", f'"{inner_proxy}"'])
-        if j["port"]:
-            parts.extend(["-P", str(j["port"])])
-        target = f"{j['username']}@{j['host']}" if j["username"] else j["host"]
-        parts.append(target)
-        parts.extend(["-nc", f"{dest_host}:{dest_port}"])
-        return " ".join(parts)
-
-    if len(parsed) == 1:
-        return _build_cmd(0, "%host", int("%port") if False else 0, None).replace(":0", ":%port")
-
-    # Multi-jump: build inside-out
-    # Innermost jump connects to second jump
-    # Second jump connects to third, etc.
-    # Outermost connects to %host:%port
-
-    # For 2 jumps [j1, j2]:
-    #   inner = plink -batch j1 -nc j2_host:j2_port
-    #   outer = plink -proxycmd "inner" -batch j2 -nc %host:%port
-    # For 3 jumps [j1, j2, j3]:
-    #   cmd1 = plink -batch j1 -nc j2_host:j2_port
-    #   cmd2 = plink -proxycmd "cmd1" -batch j2 -nc j3_host:j3_port
-    #   cmd3 = plink -proxycmd "cmd2" -batch j3 -nc %host:%port
-
-    # Build from inside out
+    # Build from inside out: each jump wraps the previous command
     current_cmd: str | None = None
 
-    for i in range(len(parsed)):
-        j = parsed[i]
-        is_last = i == len(parsed) - 1
-
-        if is_last:
+    for i, j in enumerate(parsed):
+        if i == len(parsed) - 1:
             next_host = "%host"
             next_port = "%port"
         else:

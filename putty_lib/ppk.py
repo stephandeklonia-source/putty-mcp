@@ -10,9 +10,7 @@ import base64
 import hashlib
 import hmac
 import os
-import re
 import struct
-import subprocess
 from pathlib import Path
 
 
@@ -52,10 +50,10 @@ def _read_ssh_string(data: bytes, offset: int) -> tuple[bytes, int]:
     return value, offset + 4 + length
 
 
-def _parse_openssh_new_format(raw: bytes) -> tuple[str, bytes, bytes]:
+def _parse_openssh_new_format(raw: bytes) -> tuple[str, bytes, bytes, str]:
     """Parse OpenSSH new-format private key.
 
-    Returns: (key_type, public_blob, private_blob) where the blobs
+    Returns: (key_type, public_blob, private_blob, comment) where the blobs
     are in PuTTY's expected format.
     """
     # Magic: "openssh-key-v1\0"
@@ -105,8 +103,9 @@ def _parse_openssh_new_format(raw: bytes) -> tuple[str, bytes, bytes]:
 
         # PuTTY public blob: type + pub
         public_blob = _ssh_string(b"ssh-ed25519") + _ssh_string(ed_pub)
-        # PuTTY private blob: just the 64-byte expanded key
-        private_blob = _ssh_string(ed_priv)
+        # PuTTY private blob: the 32-byte seed only (OpenSSH appends a
+        # copy of the public key to make 64 bytes; PuTTY doesn't want it)
+        private_blob = _ssh_string(ed_priv[:32])
 
     elif key_type == "ssh-rsa":
         # RSA: n, e, d, iqmp, p, q
@@ -144,7 +143,7 @@ def _parse_openssh_new_format(raw: bytes) -> tuple[str, bytes, bytes]:
     else:
         raise ValueError(f"Unsupported key type: {key_type}")
 
-    return key_type, public_blob, private_blob
+    return key_type, public_blob, private_blob, comment_bytes.decode(errors="replace")
 
 
 def openssh_to_ppk(
@@ -163,16 +162,14 @@ def openssh_to_ppk(
     if output_path is None:
         output_path = private_key_path + ".ppk"
 
-    # Read public key for comment
+    # Parse private key
+    raw = _read_openssh_private(private_key_path)
+    key_type, public_blob, private_blob, comment = _parse_openssh_new_format(raw)
+
+    # Prefer the .pub comment if present (it may have been edited)
     pub_path = private_key_path + ".pub"
     if Path(pub_path).exists():
         _, _, comment = _read_openssh_public(pub_path)
-    else:
-        comment = ""
-
-    # Parse private key
-    raw = _read_openssh_private(private_key_path)
-    key_type, public_blob, private_blob = _parse_openssh_new_format(raw)
 
     # PPK type mapping
     ppk_type = key_type  # ssh-ed25519, ssh-rsa, ecdsa-sha2-*
@@ -217,7 +214,9 @@ def openssh_to_ppk(
         f"Private-MAC: {mac_hex}\n"
     )
 
-    with open(output_path, "w", newline="\n") as f:
+    # Unencrypted private key: create owner-only (no-op on Windows ACLs)
+    fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", newline="\n") as f:
         f.write(ppk_content)
 
     return output_path
