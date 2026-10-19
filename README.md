@@ -1,184 +1,149 @@
 # PuTTY MCP Server
 
-The full PuTTY toolchain exposed as a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server. Gives AI assistants like Claude complete access to SSH, SCP, SFTP, serial, key management, and more — all through PuTTY's battle-tested Windows tools.
+An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants (Claude Code, Claude Desktop, …) the full PuTTY toolchain: SSH, Telnet, serial, SCP/SFTP, port forwarding, jump hosts, key management and PuTTY's saved sessions. It has 30 tools.
 
-**30 tools** across 8 categories. Windows-native. Covers every PuTTY executable.
+Each tool call is shown live in a local **monitor dashboard**. From there you can kill one connection, or everything at once.
 
-## What Makes This Different
-
-Most SSH MCP servers give you basic `ssh` and `scp` wrappers. This one wraps the **entire PuTTY suite** with features you won't find elsewhere:
-
-- **Persistent interactive sessions** — Open a shell, send commands, read output over multiple turns. Background reader threads keep output flowing.
-- **Native PPK v3 key conversion** — Converts OpenSSH keys to PuTTY's PPK format in pure Python. No GUI puttygen needed.
-- **Windows Registry integration** — Full CRUD for PuTTY saved sessions. Create, read, update, delete sessions programmatically.
-- **Multi-hop SSH** — Chain through jump hosts with automatically constructed proxy commands.
-- **Serial port support** — Open PuTTY on COM ports with configurable baud, parity, stop bits.
-- **Pageant integration** — Load keys into PuTTY's SSH agent.
-
-## Covered Executables
-
-| Executable | Purpose |
-|-----------|---------|
-| `putty.exe` | GUI terminal sessions (SSH, Telnet, serial, raw) |
-| `plink` | Command-line SSH/Telnet/serial execution |
-| `pscp` | SCP/SFTP file transfer |
-| `psftp` | Interactive SFTP sessions |
-| `pageant` | SSH key agent |
-| `puttygen` | Key generation (via `ssh-keygen` + native PPK converter) |
-
-## Quick Start
-
-### Prerequisites
+## Requirements
 
 - Python 3.10+
-- [PuTTY](https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html) installed (all tools)
-- Windows (PuTTY is Windows-native; registry tools require Windows)
+- [PuTTY](https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html) (plink, pscp, psftp, pageant, putty)
+- OpenSSH `ssh-keygen` for key generation (built into Windows 10+)
+- Windows for the registry and GUI tools. The plink, pscp and psftp tools also work on Linux and macOS.
 
-### Install
+## Installation
 
 ```bash
-git clone https://github.com/wgthomas/putty-mcp.git
+git clone https://github.com/stephandeklonia-source/putty-mcp.git
 cd putty-mcp
-pip install -r requirements.txt
+pip install .
 ```
 
-### Configure Claude Code / Claude Desktop
-
-Add to your MCP config (`~/.claude.json` or Claude Desktop settings):
+Add the server to your MCP client, for example in `~/.claude.json` or the Claude Desktop settings:
 
 ```json
 {
   "mcpServers": {
     "putty": {
-      "command": "python",
-      "args": ["/path/to/putty-mcp/putty_mcp.py"],
-      "env": {}
+      "command": "putty-mcp"
     }
   }
 }
 ```
 
-PuTTY executables are auto-detected from `C:\Program Files\PuTTY`, PATH, or `PUTTY_PATH` env var.
+If you'd rather not install it, use `"command": "python", "args": ["C:/path/to/putty-mcp/putty_mcp.py"]` after `pip install -r requirements.txt`.
 
-## Tools (30)
+The server works with `mcp` 1.25+ and 2.x. 2.x is recommended: it runs tool calls in parallel, while 1.x runs them one at a time. To upgrade, use the same Python that your MCP client starts:
 
-### GUI Launch (3)
+```powershell
+python -m pip install --upgrade "mcp[cli]>=2.2,<3"
+python -c "import mcp.server.mcpserver; print('mcp 2.x OK')"
+```
 
-| Tool | Description |
-|------|-------------|
-| `putty_open` | Launch PuTTY with full connection parameters |
-| `putty_open_session` | Launch PuTTY from a saved session name |
-| `putty_serial` | Launch PuTTY on a serial port |
+The server looks for PuTTY in this order: `executable_path` in `config.toml`, the `PUTTY_PATH` environment variable, `PATH`, then `C:\Program Files\PuTTY`.
 
-### Command Execution (3)
+## Monitor and kill switch
 
-| Tool | Description |
-|------|-------------|
-| `plink_exec` | Run a single command on a remote host via plink |
-| `plink_script` | Run commands from a local script file via plink |
-| `plink_tunnel` | Create SSH tunnel (port forward) or `-nc` connection |
+![Monitor dashboard](docs/monitor.png)
 
-### Persistent Sessions (5)
+The first time a tool is called, the server opens a dashboard in your browser. It shows:
 
-| Tool | Description |
-|------|-------------|
-| `session_open` | Open persistent interactive session (SSH/Telnet/serial/raw) |
-| `session_send` | Send command to a session and return new output |
-| `session_read` | Read output buffer from a session |
-| `session_list` | List all active sessions |
-| `session_close` | Close a session and clean up |
+- **Active connections and processes**: interactive sessions, tunnels, running commands and PuTTY windows, each with a **Kill** button
+- **Running tool calls**: what is in progress right now and for how long
+- **Live session output**: what the remote shell returns, in each session
+- **Activity log**: every tool call with its arguments (commands are highlighted), result, duration and status
 
-### File Transfer (5)
+**KILL ALL** stops every process the server started, process trees included (for example plink proxy chains). It also **blocks all new tool calls**. While blocked, the AI gets the error "Blocked by operator… Stop and ask the user what to do". Click **Allow tool calls** to lift the block. **Block new tool calls** blocks without killing anything.
 
-| Tool | Description |
-|------|-------------|
-| `pscp_upload` | Upload file(s) to remote host via pscp |
-| `pscp_download` | Download file(s) from remote host via pscp |
-| `pscp_list` | List remote directory via pscp |
-| `psftp_batch` | Execute SFTP commands as a batch via psftp |
-| `psftp_interactive` | Open persistent PSFTP session for multi-step workflows |
+The dashboard listens only on `127.0.0.1` and needs a random token that is in its URL. It is new on every server start and appears in the server log. Other websites can't read the dashboard or press its buttons. Passphrases are shown as `***`.
 
-### Key Management (6)
+> **Note:** the kill switch protects you against tool calls through this server. It is no sandbox. An assistant that also has shell access (like Claude Code) can still run other programs itself.
 
-| Tool | Description |
-|------|-------------|
-| `keygen_create` | Generate SSH key pair (OpenSSH + PPK format) |
-| `keygen_fingerprint` | Get fingerprint of an existing key |
-| `keygen_convert` | Convert key to different format (RFC4716, PKCS8, PEM, PPK) |
-| `keygen_public_key` | Extract public key in authorized_keys format |
-| `pageant_add` | Load key(s) into Pageant |
-| `pageant_list` | List keys loaded in Pageant |
+## Tools
 
-### Saved Sessions — Registry (4)
+| Category | Tool | Description |
+|---|---|---|
+| **GUI** | `putty_open` | Open a PuTTY window with connection parameters |
+| | `putty_open_session` | Open a PuTTY window from a saved session |
+| | `putty_serial` | Open a PuTTY window on a serial port |
+| **Commands** | `plink_exec` | Run a single command on a remote host |
+| | `plink_script` | Run a local script file remotely (`plink -m`) |
+| | `plink_tunnel` | Port forwarding (`-L`/`-R`/`-D`) or `-nc` connection |
+| **Sessions** | `session_open` | Open a persistent interactive session (SSH/Telnet/serial/raw) |
+| | `session_send` | Send a command and return the new output |
+| | `session_read` | Read the output buffer |
+| | `session_list` | List active sessions |
+| | `session_close` | Close a session |
+| **File transfer** | `pscp_upload` / `pscp_download` | Copy files via pscp |
+| | `pscp_list` | List a remote directory |
+| | `psftp_batch` | Run SFTP commands as a batch |
+| | `psftp_interactive` | Persistent SFTP session (use with `session_send`) |
+| **Keys** | `keygen_create` | Generate a key pair (OpenSSH + `.ppk`) |
+| | `keygen_fingerprint` | Fingerprint of a key |
+| | `keygen_convert` | Export the public key (RFC4716/PKCS8/PEM) or convert the private key to PPK |
+| | `keygen_public_key` | Public key in `authorized_keys` format |
+| | `pageant_add` | Load keys into Pageant |
+| | `pageant_list` | List keys in Pageant |
+| **Saved sessions** | `saved_sessions_list` | List PuTTY sessions from the registry |
+| | `saved_session_get` | Read a saved session |
+| | `saved_session_create` | Create or update a saved session |
+| | `saved_session_delete` | Delete a saved session |
+| **Utility** | `test_connection` | Test an SSH or Telnet connection |
+| | `get_host_key` | Get a server's host key fingerprint (for `host_keys`) |
+| **Multi-hop** | `proxy_session` | Interactive session via a custom `-proxycmd` |
+| | `chain_exec` | Run a command via one or more jump hosts (`user@host:port`) |
 
-| Tool | Description |
-|------|-------------|
-| `saved_sessions_list` | List all PuTTY saved sessions |
-| `saved_session_get` | Get full config of a saved session |
-| `saved_session_create` | Create or update a saved session |
-| `saved_session_delete` | Delete a saved session |
-
-### Utility (2)
-
-| Tool | Description |
-|------|-------------|
-| `test_connection` | Test SSH/Telnet connectivity, returns host key |
-| `get_host_key` | Get SSH host key fingerprint from a server |
-
-### Multi-Hop (2)
-
-| Tool | Description |
-|------|-------------|
-| `proxy_session` | Open interactive session through a proxy command |
-| `chain_exec` | Execute command on target through one or more jump hosts |
+If you leave out `port`, PuTTY picks the protocol's default port (22 for SSH, 23 for Telnet) or the port stored in the loaded saved session.
 
 ## Configuration
 
-Copy `config.template.toml` to `config.toml` and adjust as needed:
+Copy `config.template.toml` to `config.toml`. All settings are optional.
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `putty.executable_path` | Auto-detected | Path to PuTTY install directory |
-| `putty.enable_registry` | `true` | Enable Windows Registry session tools |
-| `defaults.protocol` | `ssh` | Default connection protocol |
-| `defaults.port` | `22` | Default port |
-| `sessions.max_concurrent` | `10` | Max simultaneous interactive sessions |
-| `sessions.timeout_seconds` | `3600` | Session idle timeout |
+|---|---|---|
+| `putty.executable_path` | auto | PuTTY install directory |
+| `putty.enable_registry` | `true` | Turn the saved-sessions tools on or off |
+| `serial.*` | 9600/8/n/1/N | Default serial settings |
+| `sessions.max_concurrent` | `10` | Maximum number of interactive sessions at once |
+| `sessions.timeout_seconds` | `3600` | Close a session after this many seconds without activity |
 | `sessions.buffer_lines` | `1000` | Output buffer size per session |
-| `serial.*` | Standard | Default serial parameters (9600/8/N/1) |
-
-## Architecture
-
-```
-putty_mcp.py              # FastMCP server, all 30 tool definitions
-putty_lib/
-  config.py               # Path resolution, TOML config loading
-  executor.py             # Subprocess wrapper (run, spawn, launch_gui)
-  session_manager.py      # Persistent sessions with background readers
-  registry.py             # Windows Registry CRUD for saved sessions
-  utils.py                # Arg building, host parsing, proxy chains
-  ppk.py                  # Native Python PPK v3 writer
-```
-
-## Key Design Decisions
-
-- **No `shell=True`** — All subprocess calls use argument lists
-- **`ssh-keygen` over `puttygen`** — Windows puttygen.exe is GUI-only with no batch CLI. All key generation uses Windows OpenSSH's `ssh-keygen`, then auto-converts to PPK.
-- **Native PPK conversion** — `putty_lib/ppk.py` writes PPK v3 format from scratch in Python. Supports Ed25519, RSA, ECDSA. No GUI dependency.
-- **Thread-safe sessions** — Background reader threads with bounded deque buffers and automatic cleanup of timed-out sessions.
-
-## Known Limitations
-
-- **Pageant key listing**: Pageant has no reliable CLI flag to list loaded keys as text. The tool tries `ssh-add -L` first (requires Pageant started with `--openssh-config`), falls back to opening the GUI key list window.
-- **PPK converter**: Handles unencrypted keys only. Passphrase-protected keys need manual puttygen GUI conversion.
-- **Persistent sessions**: Return raw ANSI escape codes from remote shells. Functional but noisy.
-- **Windows only**: PuTTY is Windows-native. The registry tools require Windows. Core SSH functionality works anywhere plink is available.
+| `monitor.enabled` | `true` | Turn the dashboard on or off |
+| `monitor.port` | `8765` | Dashboard port (falls back to a free port if taken) |
+| `monitor.open_browser` | `first_call` | `first_call`, `start` or `never` |
+| `logging.enabled` / `logging.level` | `true` / `INFO` | Server logging to stderr |
 
 ## Security
 
-- **No shell=True** — All commands use `subprocess` with argument lists
-- **No credential storage** — Keys and passwords are passed per-call, never persisted by the server
-- **Registry scoped** — Only reads/writes PuTTY's own registry keys under `HKCU\Software\SimonTatham\PuTTY`
+- Commands are passed as argument lists, never through a shell (`shell=False`)
+- Processes never inherit the server's stdin (the MCP protocol stream)
+- Jump host strings containing shell or quote characters are rejected
+- Generated `.ppk` files without a passphrase get owner-only file permissions
+- The server stores no passwords or keys. Registry access is limited to `HKCU\Software\SimonTatham\PuTTY\Sessions`.
+- Non-interactive tools use `-batch`, so an unknown host key fails instead of being accepted silently. Pass `host_keys` (from `get_host_key`) for hosts you haven't connected to yet.
+
+## Known limitations
+
+- **Passphrases** for `keygen_create`/`keygen_convert` go to `ssh-keygen` on the command line, so they briefly show up in the process list. They also pass through the AI conversation.
+- **PPK conversion** only supports keys without a passphrase (Ed25519, RSA, ECDSA in OpenSSH format).
+- **Pageant** has no CLI for listing keys. `pageant_list` uses `ssh-add -L` (Pageant must run with `--openssh-config`) and otherwise opens the Pageant window.
+- **Interactive sessions** pass ANSI escape codes from the remote shell through unchanged. The dashboard filters them out.
+- **Interactive sessions without `-batch`** can stop at a password or host key prompt. You'll see that in the dashboard and can kill the session there.
+
+## Project layout
+
+```
+putty_mcp.py              MCP server and all tool definitions
+putty_lib/
+  config.py               Configuration and PuTTY path detection
+  executor.py             Running, tracking and killing processes
+  session_manager.py      Interactive sessions with background readers
+  monitor.py              Activity log, process registry, kill switch
+  monitor_web.py          Local dashboard (HTTP + token auth)
+  monitor.html            Dashboard page
+  registry.py             Saved PuTTY sessions in the Windows registry
+  ppk.py                  OpenSSH → PPK v3 conversion in pure Python
+  utils.py                Argument building, host parsing, proxy chains
+```
 
 ## License
 

@@ -3,45 +3,69 @@
 Covers: putty.exe, plink, pscp, psftp, pageant, puttygen.
 30 tools total: GUI launch, command execution, persistent sessions,
 file transfer, key management, saved sessions (registry), multi-hop.
+Every call is shown in a local monitor dashboard with a kill switch.
 """
 
 from __future__ import annotations
 
 import atexit
+import functools
+import inspect
 import logging
 import time
-from typing import Annotated
+from typing import Any, Callable, TypeVar
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp 2.x
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
+except ModuleNotFoundError:  # mcp 1.x (FastMCP was renamed to MCPServer in 2.0)
+    from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
+    from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
 from putty_lib.config import PuTTYConfig
 from putty_lib.executor import PuTTYExecutor
-from putty_lib.session_manager import SessionManager
+from putty_lib.monitor import Monitor, OperatorBlocked, kill_process_tree
+from putty_lib.monitor_web import MonitorServer
+from putty_lib.session_manager import InteractiveSession, SessionManager
 from putty_lib import registry
 from putty_lib.ppk import openssh_to_ppk
 from putty_lib.utils import (
     build_connection_args,
     build_proxy_chain,
     build_serial_args,
-    parse_host_string,
 )
 
 # ---------------------------------------------------------------------------
 # Initialize
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
+config = PuTTYConfig.load()
+
+# Logs go to stderr; stdout is reserved for the MCP stdio transport
+logging.basicConfig(
+    level=config.log_level.upper() if config.log_enabled else logging.WARNING,
+    format="%(name)s %(levelname)s: %(message)s",
+)
 log = logging.getLogger("putty-mcp")
 
-config = PuTTYConfig.load()
-executor = PuTTYExecutor(config)
+monitor = Monitor()
+executor = PuTTYExecutor(config, monitor)
 sessions = SessionManager(
     max_concurrent=config.sessions.max_concurrent,
     timeout_seconds=config.sessions.timeout_seconds,
     buffer_lines=config.sessions.buffer_lines,
 )
+monitor.attach_sessions(sessions)
 
-mcp = FastMCP("putty-mcp", json_response=True)
+monitor_server: MonitorServer | None = None
+if config.monitor.enabled:
+    try:
+        monitor_server = MonitorServer(monitor, config.monitor.host, config.monitor.port)
+        monitor_server.start()
+    except OSError as e:
+        log.warning("Activity monitor disabled: %s", e)
+
+mcp = MCPServer("putty-mcp")
 
 
 @atexit.register
@@ -49,6 +73,66 @@ def _shutdown() -> None:
     count = sessions.close_all()
     if count:
         log.info("Shutdown: closed %d sessions", count)
+    if monitor_server is not None:
+        monitor_server.stop()
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def tool() -> Callable[[_F], _F]:
+    """Register an MCP tool that reports to the activity monitor.
+
+    Every call shows up in the dashboard and is refused while the operator
+    has engaged the kill switch. Exceptions become ToolErrors so the client
+    sees the actual message (mcp 2.x hides unexpected exceptions).
+    """
+
+    def decorator(fn: _F) -> _F:
+        defaults = {
+            name: p.default
+            for name, p in inspect.signature(fn).parameters.items()
+            if p.default is not inspect.Parameter.empty
+        }
+
+        @functools.wraps(fn)
+        def wrapper(**kwargs: Any) -> Any:
+            if monitor_server is not None and config.monitor.open_browser == "first_call":
+                monitor_server.open_browser()
+            # Show only what the caller actually chose
+            shown = {k: v for k, v in kwargs.items() if k not in defaults or v != defaults[k]}
+            try:
+                call_id = monitor.call_started(fn.__name__, shown)
+            except OperatorBlocked as e:
+                raise ToolError(str(e)) from None
+            try:
+                result = fn(**kwargs)
+            except Exception as e:
+                monitor.call_finished(call_id, error=f"{type(e).__name__}: {e}")
+                if isinstance(e, ToolError):
+                    raise
+                raise ToolError(str(e)) from e
+            monitor.call_finished(call_id, result=result)
+            return result
+
+        mcp.tool()(wrapper)
+        return fn
+
+    return decorator
+
+
+def _open_session(tool_name: str, args: list[str], host: str, protocol: str, **metadata: Any) -> InteractiveSession:
+    """Spawn a long-running process and register it as an interactive session."""
+    proc, proc_id = executor.spawn(tool_name, args)
+    try:
+        session = sessions.create(proc, host=host, protocol=protocol, **metadata)
+    except Exception:
+        # e.g. max sessions reached: don't leave the process running
+        kill_process_tree(proc)
+        monitor.untrack(proc_id)
+        raise
+    monitor.link_session(proc_id, session.session_id)
+    return session
 
 
 # ===================================================================
@@ -56,10 +140,10 @@ def _shutdown() -> None:
 # ===================================================================
 
 
-@mcp.tool()
+@tool()
 def putty_open(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -90,13 +174,13 @@ def putty_open(
     return executor.launch_gui("putty", args)
 
 
-@mcp.tool()
+@tool()
 def putty_open_session(session_name: str) -> dict:
     """Launch PuTTY GUI from a saved session name."""
     return executor.launch_gui("putty", ["-load", session_name])
 
 
-@mcp.tool()
+@tool()
 def putty_serial(
     serial_port: str,
     baud: int = 9600,
@@ -115,11 +199,11 @@ def putty_serial(
 # ===================================================================
 
 
-@mcp.tool()
+@tool()
 def plink_exec(
     host: str,
     command: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -147,11 +231,11 @@ def plink_exec(
     return executor.run("plink", args, timeout=timeout)
 
 
-@mcp.tool()
+@tool()
 def plink_script(
     host: str,
     script_path: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -170,15 +254,14 @@ def plink_script(
         proxy_command=proxy_command, batch_mode=True,
     )
     # Insert -m before the host arg
-    args.insert(-1, "-m")
-    args.insert(-1, script_path)
+    args[-1:-1] = ["-m", script_path]
     return executor.run("plink", args, timeout=timeout)
 
 
-@mcp.tool()
+@tool()
 def plink_tunnel(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -200,14 +283,13 @@ def plink_tunnel(
         dynamic_forwards=dynamic_forwards, proxy_command=proxy_command,
         batch_mode=True,
     )
-    if nc_destination:
-        args.extend(["-nc", nc_destination])
-    else:
-        args.append("-N")  # No command, just tunnel
+    # Options must precede the host: plink treats everything after it
+    # as the remote command.
+    extra = ["-nc", nc_destination] if nc_destination else ["-N"]  # -N: no shell, just tunnel
+    args[-1:-1] = extra
 
-    proc = executor.spawn("plink", args)
-    session = sessions.create(
-        proc, host=host, protocol="tunnel",
+    session = _open_session(
+        "plink", args, host=host, protocol="tunnel",
         forwards={
             "local": local_forwards or [],
             "remote": remote_forwards or [],
@@ -228,10 +310,10 @@ def plink_tunnel(
 # ===================================================================
 
 
-@mcp.tool()
+@tool()
 def session_open(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -245,9 +327,13 @@ def session_open(
     proxy_command: str | None = None,
     serial_config: str | None = None,
 ) -> dict:
-    """Open a persistent interactive plink session (SSH/Telnet/serial/raw). Returns session_id."""
-    if protocol == "serial" and serial_config:
-        parts = serial_config.split(",")
+    """Open a persistent interactive plink session (SSH/Telnet/serial/raw). Returns session_id.
+
+    For serial, host is the port (e.g. COM3) and serial_config is
+    "baud,data_bits,parity,stop_bits,flow" (omitted fields use config defaults).
+    """
+    if protocol == "serial":
+        parts = [p.strip() for p in serial_config.split(",")] if serial_config else []
         args = build_serial_args(
             host,
             baud=int(parts[0]) if len(parts) > 0 else config.serial.baud,
@@ -265,8 +351,7 @@ def session_open(
             proxy_command=proxy_command,
         )
 
-    proc = executor.spawn("plink", args)
-    session = sessions.create(proc, host=host, protocol=protocol)
+    session = _open_session("plink", args, host=host, protocol=protocol)
     return {
         "session_id": session.session_id,
         "host": host,
@@ -275,7 +360,7 @@ def session_open(
     }
 
 
-@mcp.tool()
+@tool()
 def session_send(
     session_id: str,
     command: str,
@@ -286,11 +371,12 @@ def session_send(
     if not session.alive:
         return {"success": False, "error": "Session process has exited"}
 
-    # Clear buffer to capture only new output
-    session.read(clear=True)
+    # Capture only output produced after this command; the buffer itself
+    # is kept so the monitor dashboard still shows the full history.
+    mark = session.mark()
     session.send(command + "\n")
     time.sleep(wait_seconds)
-    output = session.read()
+    output = session.read_since(mark)
     return {
         "success": True,
         "output": "".join(output),
@@ -299,7 +385,7 @@ def session_send(
     }
 
 
-@mcp.tool()
+@tool()
 def session_read(
     session_id: str,
     last_n: int | None = None,
@@ -315,13 +401,13 @@ def session_read(
     }
 
 
-@mcp.tool()
+@tool()
 def session_list() -> dict:
     """List all active persistent sessions."""
     return {"sessions": sessions.list_sessions()}
 
 
-@mcp.tool()
+@tool()
 def session_close(session_id: str) -> dict:
     """Close a persistent session and clean up."""
     closed = sessions.close(session_id)
@@ -333,12 +419,34 @@ def session_close(session_id: str) -> dict:
 # ===================================================================
 
 
-@mcp.tool()
+def _transfer_args(
+    port: int | None,
+    key_file: str | None,
+    session_name: str | None,
+    host_keys: list[str] | None,
+    use_pageant: bool,
+) -> list[str]:
+    """Connection args shared by pscp and psftp."""
+    args: list[str] = []
+    if key_file:
+        args.extend(["-i", key_file])
+    if session_name:
+        args.extend(["-load", session_name])
+    if host_keys:
+        for hk in host_keys:
+            args.extend(["-hostkey", hk])
+    args.append("-agent" if use_pageant else "-noagent")
+    if port is not None:
+        args.extend(["-P", str(port)])
+    return args
+
+
+@tool()
 def pscp_upload(
     local_path: str,
     remote_path: str,
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -359,18 +467,7 @@ def pscp_upload(
         args.append("-sftp")
     elif force_protocol == "scp":
         args.append("-scp")
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     # Source and destination
     args.append(local_path)
@@ -380,12 +477,12 @@ def pscp_upload(
     return executor.run("pscp", args, timeout=timeout)
 
 
-@mcp.tool()
+@tool()
 def pscp_download(
     remote_path: str,
     local_path: str,
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -406,18 +503,7 @@ def pscp_download(
         args.append("-sftp")
     elif force_protocol == "scp":
         args.append("-scp")
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     remote = f"{username}@{host}:{remote_path}" if username else f"{host}:{remote_path}"
     args.append(remote)
@@ -426,11 +512,11 @@ def pscp_download(
     return executor.run("pscp", args, timeout=timeout)
 
 
-@mcp.tool()
+@tool()
 def pscp_list(
     remote_path: str,
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -440,18 +526,7 @@ def pscp_list(
 ) -> dict:
     """List remote directory via pscp -ls."""
     args: list[str] = ["-batch", "-ls"]
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     remote = f"{username}@{host}:{remote_path}" if username else f"{host}:{remote_path}"
     args.append(remote)
@@ -459,11 +534,11 @@ def pscp_list(
     return executor.run("pscp", args, timeout=timeout)
 
 
-@mcp.tool()
+@tool()
 def psftp_batch(
     host: str,
     commands: list[str],
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -479,18 +554,7 @@ def psftp_batch(
     args: list[str] = ["-batch"]
     if continue_on_error:
         args.append("-be")
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
 
     target = f"{username}@{host}" if username else host
     args.append(target)
@@ -499,10 +563,10 @@ def psftp_batch(
     return executor.run("psftp", args, input_text=batch_input, timeout=timeout)
 
 
-@mcp.tool()
+@tool()
 def psftp_interactive(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     key_file: str | None = None,
     session_name: str | None = None,
@@ -510,25 +574,12 @@ def psftp_interactive(
     use_pageant: bool = True,
 ) -> dict:
     """Open a persistent PSFTP session for multi-step SFTP workflows. Returns session_id."""
-    args: list[str] = []
-    if key_file:
-        args.extend(["-i", key_file])
-    if session_name:
-        args.extend(["-load", session_name])
-    if host_keys:
-        for hk in host_keys:
-            args.extend(["-hostkey", hk])
-    if use_pageant:
-        args.append("-agent")
-    else:
-        args.append("-noagent")
-    args.extend(["-P", str(port)])
+    args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
 
     target = f"{username}@{host}" if username else host
     args.append(target)
 
-    proc = executor.spawn("psftp", args)
-    session = sessions.create(proc, host=host, protocol="sftp")
+    session = _open_session("psftp", args, host=host, protocol="sftp")
     return {
         "session_id": session.session_id,
         "host": host,
@@ -542,7 +593,7 @@ def psftp_interactive(
 # ===================================================================
 
 
-@mcp.tool()
+@tool()
 def keygen_create(
     output_path: str,
     key_type: str = "ed25519",
@@ -576,7 +627,7 @@ def keygen_create(
     return result
 
 
-@mcp.tool()
+@tool()
 def keygen_fingerprint(
     key_path: str,
     algorithm: str = "sha256",
@@ -586,7 +637,7 @@ def keygen_fingerprint(
     return executor.run("ssh-keygen", args, timeout=10)
 
 
-@mcp.tool()
+@tool()
 def keygen_convert(
     input_path: str,
     output_path: str,
@@ -596,7 +647,8 @@ def keygen_convert(
     """Convert/export a key to a different format.
 
     output_format: RFC4716, PKCS8, PEM, PPK
-    PPK conversion is done natively (no GUI needed).
+    RFC4716/PKCS8/PEM export the public key (ssh-keygen -e).
+    PPK converts the (unencrypted) private key natively (no GUI needed).
     """
     if output_format.upper() == "PPK":
         try:
@@ -606,6 +658,8 @@ def keygen_convert(
             return {"success": False, "error": str(e)}
 
     args = ["-e", "-f", input_path, "-m", output_format]
+    if passphrase:
+        args.extend(["-P", passphrase])
     result = executor.run("ssh-keygen", args, timeout=10)
     if result["success"] and output_path:
         try:
@@ -617,14 +671,14 @@ def keygen_convert(
     return result
 
 
-@mcp.tool()
+@tool()
 def keygen_public_key(key_path: str) -> dict:
     """Extract public key in OpenSSH authorized_keys format."""
     args = ["-y", "-f", key_path]
     return executor.run("ssh-keygen", args, timeout=10)
 
 
-@mcp.tool()
+@tool()
 def pageant_add(
     key_paths: list[str],
     encrypted: bool = False,
@@ -641,7 +695,7 @@ def pageant_add(
     return executor.launch_gui("pageant", args)
 
 
-@mcp.tool()
+@tool()
 def pageant_list() -> dict:
     """List keys currently loaded in Pageant.
 
@@ -674,7 +728,7 @@ def pageant_list() -> dict:
 # ===================================================================
 
 
-@mcp.tool()
+@tool()
 def saved_sessions_list() -> dict:
     """List all PuTTY saved sessions from the Windows registry."""
     if not config.enable_registry:
@@ -686,7 +740,7 @@ def saved_sessions_list() -> dict:
         return {"error": str(e), "sessions": []}
 
 
-@mcp.tool()
+@tool()
 def saved_session_get(session_name: str) -> dict:
     """Get full config of a saved PuTTY session."""
     if not config.enable_registry:
@@ -697,7 +751,7 @@ def saved_session_get(session_name: str) -> dict:
         return {"error": str(e)}
 
 
-@mcp.tool()
+@tool()
 def saved_session_create(
     session_name: str,
     host: str | None = None,
@@ -741,7 +795,7 @@ def saved_session_create(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@tool()
 def saved_session_delete(session_name: str) -> dict:
     """Delete a saved PuTTY session from the registry."""
     if not config.enable_registry:
@@ -758,10 +812,10 @@ def saved_session_delete(session_name: str) -> dict:
 # ===================================================================
 
 
-@mcp.tool()
+@tool()
 def test_connection(
     host: str,
-    port: int = 22,
+    port: int | None = None,
     username: str | None = None,
     protocol: str = "ssh",
     key_file: str | None = None,
@@ -790,7 +844,7 @@ def test_connection(
         return {"error": f"test_connection does not support protocol '{protocol}'"}
 
 
-@mcp.tool()
+@tool()
 def get_host_key(
     host: str,
     port: int = 22,
@@ -816,7 +870,7 @@ def get_host_key(
 # ===================================================================
 
 
-@mcp.tool()
+@tool()
 def proxy_session(
     target_host: str,
     proxy_cmd: str,
@@ -833,8 +887,7 @@ def proxy_session(
         key_file=key_file, host_keys=host_keys, use_pageant=use_pageant,
         compress=compress, proxy_command=proxy_cmd,
     )
-    proc = executor.spawn("plink", args)
-    session = sessions.create(proc, host=target_host, protocol="ssh-proxy")
+    session = _open_session("plink", args, host=target_host, protocol="ssh-proxy")
     return {
         "session_id": session.session_id,
         "host": target_host,
@@ -843,7 +896,7 @@ def proxy_session(
     }
 
 
-@mcp.tool()
+@tool()
 def chain_exec(
     target_host: str,
     command: str,
@@ -858,7 +911,10 @@ def chain_exec(
     jump_hosts: list of "user@host:port" strings in hop order.
     Builds nested plink -proxycmd chain automatically.
     """
-    proxy_cmd = build_proxy_chain(jump_hosts, target_host, target_port)
+    try:
+        proxy_cmd = build_proxy_chain(jump_hosts)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     args = build_connection_args(
         host=target_host, port=target_port, username=target_username,
         protocol="ssh", key_file=key_file, proxy_command=proxy_cmd,
@@ -875,5 +931,11 @@ def chain_exec(
 # Entry point
 # ===================================================================
 
-if __name__ == "__main__":
+def main() -> None:
+    if monitor_server is not None and config.monitor.open_browser == "start":
+        monitor_server.open_browser()
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

@@ -4,11 +4,21 @@ version = "1.0.0"
 description = "MCP server exposing the full PuTTY toolchain"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp[cli]>=1.25.0,<3",
     "pydantic>=2.0.0",
     "tomli>=2.0.0;python_version<'3.11'",
 ]
 
+[project.scripts]
+putty-mcp = "putty_mcp:main"
+
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["putty_lib"]
+py-modules = ["putty_mcp"]
+
+[tool.setuptools.package-data]
+putty_lib = ["monitor.html"]
