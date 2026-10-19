@@ -15,8 +15,12 @@ import logging
 import time
 from typing import Any, Callable, TypeVar
 
-from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
+try:  # mcp 2.x
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
+except ModuleNotFoundError:  # mcp 1.x (FastMCP was renamed to MCPServer in 2.0)
+    from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
+    from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
 from putty_lib.config import PuTTYConfig
 from putty_lib.executor import PuTTYExecutor

@@ -33,6 +33,13 @@ Add the server to your MCP client, for example in `~/.claude.json` or the Claude
 
 If you'd rather not install it, use `"command": "python", "args": ["C:/path/to/putty-mcp/putty_mcp.py"]` after `pip install -r requirements.txt`.
 
+The server works with `mcp` 1.25+ and 2.x. 2.x is recommended: it runs tool calls in parallel, while 1.x runs them one at a time. To upgrade, use the same Python that your MCP client starts:
+
+```powershell
+python -m pip install --upgrade "mcp[cli]>=2.2,<3"
+python -c "import mcp.server.mcpserver; print('mcp 2.x OK')"
+```
+
 The server looks for PuTTY in this order: `executable_path` in `config.toml`, the `PUTTY_PATH` environment variable, `PATH`, then `C:\Program Files\PuTTY`.
 
 ## Monitor and kill switch
