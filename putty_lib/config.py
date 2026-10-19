@@ -43,6 +43,15 @@ class SessionDefaults:
 
 
 @dataclass
+class MonitorSettings:
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8765
+    # "first_call" (default), "start" or "never"
+    open_browser: str = "first_call"
+
+
+@dataclass
 class PuTTYConfig:
     executable_path: Path | None = None
     enable_registry: bool = True
@@ -50,6 +59,7 @@ class PuTTYConfig:
     default_port: int = 22
     serial: SerialDefaults = field(default_factory=SerialDefaults)
     sessions: SessionDefaults = field(default_factory=SessionDefaults)
+    monitor: MonitorSettings = field(default_factory=MonitorSettings)
     log_enabled: bool = True
     log_level: str = "INFO"
 
@@ -95,6 +105,11 @@ class PuTTYConfig:
         for key in ("max_concurrent", "timeout_seconds", "buffer_lines"):
             if key in sessions:
                 setattr(self.sessions, key, sessions[key])
+
+        monitor = data.get("monitor", {})
+        for key in ("enabled", "host", "port", "open_browser"):
+            if key in monitor:
+                setattr(self.monitor, key, monitor[key])
 
         logging_cfg = data.get("logging", {})
         self.log_enabled = logging_cfg.get("enabled", self.log_enabled)

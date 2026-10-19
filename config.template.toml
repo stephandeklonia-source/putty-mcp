@@ -21,6 +21,16 @@ max_concurrent = 10
 timeout_seconds = 3600
 buffer_lines = 1000
 
+[monitor]
+# Live web dashboard to watch tool calls and kill connections
+enabled = true
+# Keep on 127.0.0.1: the dashboard can kill processes
+host = "127.0.0.1"
+# Falls back to a free port if taken (the URL is in the server log)
+port = 8765
+# When to open the dashboard in your browser: "first_call", "start" or "never"
+open_browser = "first_call"
+
 [logging]
 enabled = true
 level = "INFO"

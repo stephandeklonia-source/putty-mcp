@@ -27,6 +27,7 @@ class InteractiveSession:
     last_activity: float = field(default_factory=time.time)
 
     _buffer: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
+    _total_lines: int = 0  # lines ever received, for mark()/read_since()
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
     _stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -47,6 +48,7 @@ class InteractiveSession:
                     break
                 with self._lock:
                     self._buffer.append(line)
+                    self._total_lines += 1
         except (ValueError, OSError):
             pass  # pipe closed
 
@@ -71,6 +73,23 @@ class InteractiveSession:
             if clear:
                 self._buffer.clear()
         return lines
+
+    def mark(self) -> int:
+        """Current output position, for read_since()."""
+        with self._lock:
+            return self._total_lines
+
+    def read_since(self, mark: int) -> list[str]:
+        """Lines received after mark(), without clearing the buffer."""
+        self.last_activity = time.time()
+        with self._lock:
+            new = min(self._total_lines - mark, len(self._buffer))
+            return list(self._buffer)[len(self._buffer) - new:] if new > 0 else []
+
+    def peek(self, last_n: int) -> list[str]:
+        """Return the last N buffered lines without counting as activity."""
+        with self._lock:
+            return list(self._buffer)[-last_n:]
 
     @property
     def alive(self) -> bool:

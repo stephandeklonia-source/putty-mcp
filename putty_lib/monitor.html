@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PuTTY MCP Monitor</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085;
+    --border: #dde1e8; --accent: #2f6fde; --ok: #1f8a4c; --warn: #b7791f;
+    --bad: #c62828; --term-bg: #10141b; --term-text: #d7dde8; --chip: #eef1f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1117; --panel: #161b22; --text: #e3e8ef; --muted: #8b95a7;
+      --border: #2a313c; --accent: #6ea2ff; --ok: #4cc27e; --warn: #e0a84a;
+      --bad: #ff6b6b; --term-bg: #0a0d12; --term-text: #d7dde8; --chip: #222a35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px;
+           align-items: center; padding: 12px 16px; background: var(--panel);
+           border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); }
+  .status.locked .dot { background: var(--bad); }
+  .status.offline .dot { background: var(--muted); }
+  .spacer { flex: 1; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--chip); color: var(--text);
+           border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 700; }
+  button.kill-all { padding: 10px 18px; font-size: 15px; letter-spacing: .02em; }
+  button.small { padding: 2px 10px; font-size: 13px; }
+  .banner { display: none; padding: 10px 16px; background: var(--bad); color: #fff; font-weight: 600; }
+  .banner.show { display: block; }
+  main { display: grid; gap: 16px; padding: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+               margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--border);
+               display: flex; justify-content: space-between; align-items: center; }
+  .wide { grid-column: 1 / -1; }
+  .empty { color: var(--muted); padding: 12px 14px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 12px; }
+  tr:last-child td { border-bottom: 0; }
+  code, pre, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+  .cmd { word-break: break-all; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; background: var(--chip);
+         font-size: 12px; font-weight: 600; }
+  .tag.ok { color: var(--ok); } .tag.running { color: var(--accent); }
+  .tag.failed, .tag.error, .tag.blocked, .tag.killed { color: var(--bad); }
+  .tag.operator { color: var(--warn); }
+  .term { background: var(--term-bg); color: var(--term-text); margin: 0; padding: 12px 14px;
+          height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+          border-radius: 0 0 8px 8px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .tabs button.active { border-color: var(--accent); color: var(--accent); }
+  .log { max-height: 520px; overflow: auto; }
+  .ev { padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .ev:last-child { border-bottom: 0; }
+  .ev-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .time { color: var(--muted); font-size: 12px; min-width: 64px; }
+  .tool { font-weight: 600; }
+  .args { margin-top: 4px; color: var(--muted); word-break: break-all; }
+  .args b { color: var(--text); font-weight: 600; }
+  details { margin-top: 4px; }
+  details pre { background: var(--term-bg); color: var(--term-text); padding: 8px 10px; border-radius: 6px;
+                max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 6px 0 0; }
+  summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PuTTY MCP Monitor</h1>
+  <span id="status" class="status offline"><span class="dot"></span><span id="status-text">Connecting…</span></span>
+  <span id="meta" class="mono" style="color:var(--muted)"></span>
+  <span class="spacer"></span>
+  <button id="lock-btn" type="button">Block new tool calls</button>
+  <button id="kill-all" class="danger kill-all" type="button">KILL ALL</button>
+</header>
+<div id="banner" class="banner">Kill switch engaged: new tool calls are refused until you click “Allow tool calls”.</div>
+
+<main>
+  <section>
+    <h2>Active connections &amp; processes <span id="proc-count"></span></h2>
+    <div id="procs"></div>
+  </section>
+
+  <section>
+    <h2>Running tool calls <span id="call-count"></span></h2>
+    <div id="calls"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Live session output</h2>
+    <div id="session-tabs" class="tabs"></div>
+    <pre id="term" class="term"></pre>
+  </section>
+
+  <section class="wide">
+    <h2>Activity log <button id="clear-log" class="small" type="button">Clear</button></h2>
+    <div id="log" class="log"><div class="empty">No activity yet.</div></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  // Token comes from the URL once, then lives in sessionStorage so reloads work
+  const params = new URLSearchParams(location.search);
+  let token = params.get("token");
+  try {
+    if (token) sessionStorage.setItem("putty-mcp-token", token);
+    else token = sessionStorage.getItem("putty-mcp-token");
+  } catch (e) { /* storage unavailable: keep the URL token */ }
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  };
+  const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString();
+  const fmtAge = (s) => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
+                                 : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+
+  let since = 0;
+  let selectedSession = null;
+  let locked = false;
+  const events = [];
+
+  async function api(path, body) {
+    const opts = { headers: { "X-Monitor-Token": token || "" } };
+    if (body !== undefined) {
+      opts.method = "POST";
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    const r = await fetch(path, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  }
+
+  // Highlight the parts of the arguments a human most needs to check
+  const KEY_ARGS = ["command", "commands", "host", "target_host", "username", "remote_path", "local_path",
+                    "jump_hosts", "proxy_command", "proxy_cmd", "local_forwards", "remote_forwards",
+                    "dynamic_forwards", "session_id", "session_name", "script_path", "output_path"];
+
+  function renderArgs(args) {
+    const box = el("div", "args mono");
+    const keys = Object.keys(args || {}).sort((a, b) => {
+      const ia = KEY_ARGS.indexOf(a), ib = KEY_ARGS.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+    keys.forEach((k, i) => {
+      if (i) box.append(document.createTextNode("  "));
+      box.append(el("span", null, `${k}=`));
+      const v = el(KEY_ARGS.includes(k) ? "b" : "span", null, JSON.stringify(args[k]));
+      box.append(v);
+    });
+    return box;
+  }
+
+  function resultText(ev) {
+    if (ev.error) return ev.error;
+    const r = ev.result;
+    if (r && typeof r === "object") {
+      const parts = [];
+      if (r.stdout) parts.push(r.stdout);
+      if (r.output) parts.push(r.output);
+      if (r.stderr) parts.push("[stderr]\n" + r.stderr);
+      if (parts.length) return parts.join("\n");
+      return JSON.stringify(r, null, 2);
+    }
+    return r === undefined ? "" : JSON.stringify(r, null, 2);
+  }
+
+  function renderLog() {
+    const log = $("log");
+    log.replaceChildren();
+    if (!events.length) { log.append(el("div", "empty", "No activity yet.")); return; }
+    // Merge each call with its result so one row shows the whole story
+    const results = new Map();
+    for (const ev of events) if (ev.kind === "result") results.set(ev.call_id, ev);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i];
+      if (ev.kind === "result") continue;
+      const row = el("div", "ev");
+      const head = el("div", "ev-head");
+      head.append(el("span", "time", fmtTime(ev.time)));
+      if (ev.kind === "call") {
+        const res = results.get(ev.call_id);
+        const status = ev.status === "blocked" ? "blocked" : res ? res.status : "running";
+        head.append(el("span", `tag ${status}`, status));
+        head.append(el("span", "tool mono", ev.tool));
+        if (res) head.append(el("span", "time", `${res.duration}s`));
+        row.append(head, renderArgs(ev.args));
+        if (res) {
+          const text = resultText(res);
+          if (text) {
+            const d = el("details");
+            d.append(el("summary", null, "Result"), el("pre", null, text));
+            row.append(d);
+          }
+        }
+      } else if (ev.kind === "process") {
+        // One-shot commands already appear as their tool call row
+        if (ev.ptype === "command" && ev.status !== "killed") continue;
+        head.append(el("span", `tag ${ev.status === "killed" ? "killed" : "ok"}`, `${ev.ptype} ${ev.status}`));
+        head.append(el("span", "mono", `${ev.tool} PID ${ev.pid}`));
+        row.append(head, el("div", "args mono cmd", ev.label));
+      } else if (ev.kind === "operator") {
+        head.append(el("span", "tag operator", "operator"), el("span", null, ev.message));
+        row.append(head);
+      }
+      log.append(row);
+    }
+  }
+
+  function renderProcs(procs) {
+    $("proc-count").textContent = procs.length ? String(procs.length) : "";
+    const box = $("procs");
+    box.replaceChildren();
+    if (!procs.length) { box.append(el("div", "empty", "Nothing running.")); return; }
+    const t = el("table");
+    const hr = el("tr");
+    ["Type", "Command", "Age", ""].forEach((h) => hr.append(el("th", null, h)));
+    t.append(hr);
+    for (const p of procs) {
+      const tr = el("tr");
+      tr.append(el("td", null, p.kind + (p.session_id ? ` ${p.session_id}` : "")));
+      const cmd = el("td", "mono cmd", p.label);
+      tr.append(cmd, el("td", null, fmtAge(p.age_seconds)));
+      const td = el("td");
+      const b = el("button", "danger small", "Kill");
+      b.type = "button";
+      b.onclick = async () => {
+        b.disabled = true;
+        try { await api("/api/kill", { proc_id: p.proc_id }); } catch (e) { alert("Kill failed: " + e.message); }
+        poll();
+      };
+      td.append(b);
+      tr.append(td);
+      t.append(tr);
+    }
+    box.append(t);
+  }
+
+  function renderCalls(calls) {
+    $("call-count").textContent = calls.length ? String(calls.length) : "";
+    const box = $("calls");
+    box.replaceChildren();
+    if (!calls.length) { box.append(el("div", "empty", "Idle.")); return; }
+    for (const c of calls) {
+      const row = el("div", "ev");
+      const head = el("div", "ev-head");
+      head.append(el("span", "tag running", "running"), el("span", "tool mono", c.tool),
+                  el("span", "time", fmtAge(c.elapsed)));
+      row.append(head, renderArgs(c.args));
+      box.append(row);
+    }
+  }
+
+  function renderSessions(sessions) {
+    const tabs = $("session-tabs");
+    const term = $("term");
+    if (!sessions.find((s) => s.session_id === selectedSession)) {
+      // Prefer the newest session that has output (tunnels usually have none)
+      const withOutput = sessions.filter((s) => s.output);
+      const pick = withOutput.length ? withOutput : sessions;
+      selectedSession = pick.length ? pick[pick.length - 1].session_id : null;
+    }
+    term.style.display = sessions.length ? "" : "none";
+    tabs.replaceChildren();
+    for (const s of sessions) {
+      const b = el("button", s.session_id === selectedSession ? "active" : "",
+                   `${s.host} · ${s.protocol}${s.alive ? "" : " (exited)"}`);
+      b.type = "button";
+      b.onclick = () => { selectedSession = s.session_id; poll(); };
+      tabs.append(b);
+    }
+    if (!sessions.length) tabs.append(el("span", "empty", "No interactive sessions."));
+    const cur = sessions.find((s) => s.session_id === selectedSession);
+    const atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 20;
+    // Strip ANSI escape codes from remote shells; rendered as text, never HTML
+    const text = cur ? cur.output.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/\x1b\][^\x07]*\x07/g, "") : "";
+    if (term.textContent !== text) {
+      term.textContent = text;
+      if (atBottom) term.scrollTop = term.scrollHeight;
+    }
+  }
+
+  function renderStatus(state) {
+    locked = state.locked;
+    const st = $("status");
+    st.className = "status" + (locked ? " locked" : "");
+    $("status-text").textContent = locked ? "BLOCKED" : "Live";
+    $("banner").classList.toggle("show", locked);
+    $("lock-btn").textContent = locked ? "Allow tool calls" : "Block new tool calls";
+    $("meta").textContent = `server PID ${state.pid} · up ${fmtAge(state.uptime)}`;
+  }
+
+  let polling = false;
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    try {
+      const s = await api(`/api/state?since=${since}`);
+      for (const ev of s.events) { events.push(ev); since = Math.max(since, ev.seq); }
+      if (events.length > 500) events.splice(0, events.length - 500);
+      renderStatus(s);
+      renderProcs(s.processes);
+      renderCalls(s.running_calls);
+      renderSessions(s.sessions);
+      if (s.events.length) renderLog();
+    } catch (e) {
+      $("status").className = "status offline";
+      $("status-text").textContent = e.message.includes("403") ? "Invalid token" : "Server not reachable";
+    } finally {
+      polling = false;
+    }
+  }
+
+  $("kill-all").onclick = async () => {
+    try { await api("/api/kill_all", {}); } catch (e) { alert("Kill switch failed: " + e.message); }
+    poll();
+  };
+  $("lock-btn").onclick = async () => {
+    if (locked && !confirm("Allow the AI to call PuTTY tools again?")) return;
+    try { await api("/api/lock", { locked: !locked }); } catch (e) { alert(e.message); }
+    poll();
+  };
+  $("clear-log").onclick = () => { events.length = 0; renderLog(); };
+
+  poll();
+  setInterval(poll, 1000);
+})();
+</script>
+</body>
+</html>
