@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
 from putty_lib.config import PuTTYConfig
@@ -13,22 +12,21 @@ from putty_lib.monitor import Monitor, kill_process_tree
 
 log = logging.getLogger(__name__)
 
-# Flags whose following argument is a secret and must not be logged
-_SECRET_FLAGS: dict[str, set[str]] = {"ssh-keygen": {"-N", "-P"}}
+# Flags whose following argument is a secret and must never be shown
+_SECRET_FLAGS = {"-pw", "-pwfile"}
 
 # Own process group on POSIX so the kill switch can take out child processes
 # (e.g. plink -proxycmd chains) too. Windows uses taskkill /T instead.
 _POPEN_GROUP: dict[str, Any] = {} if sys.platform == "win32" else {"start_new_session": True}
 
 
-def loggable(tool: str, cmd: list[str], short: bool = False) -> str:
-    """Command line with secrets masked; short=True drops the exe's directory."""
-    secret_flags = _SECRET_FLAGS.get(tool, set())
-    out: list[str] = [Path(cmd[0]).stem if short else cmd[0]]
-    hide_next = cmd[0] in secret_flags
-    for part in cmd[1:]:
+def loggable(prefix: list[str], args: list[str], label: str | None = None) -> str:
+    """Command line with secrets masked; label replaces the exe path if given."""
+    out = [label] if label else list(prefix)
+    hide_next = False
+    for part in args:
         out.append("***" if hide_next else part)
-        hide_next = part in secret_flags
+        hide_next = part in _SECRET_FLAGS
     return " ".join(out)
 
 
@@ -60,9 +58,9 @@ class PuTTYExecutor:
             {"stdout": str, "stderr": str, "return_code": int, "success": bool}
             plus "killed_by_operator": True if the kill switch ended it.
         """
-        exe = self.config.get_exe(tool)
-        cmd = [str(exe)] + args
-        log.info("run: %s", loggable(tool, cmd))
+        prefix = self.config.command_for(tool)
+        cmd = prefix + args
+        log.info("run: %s", loggable(prefix, args))
 
         try:
             proc = subprocess.Popen(
@@ -77,11 +75,11 @@ class PuTTYExecutor:
                 **_POPEN_GROUP,
             )
         except FileNotFoundError:
-            return _error(f"Executable not found: {exe}")
+            return _error(f"Executable not found: {cmd[0]}")
         except OSError as e:
             return _error(str(e))
 
-        proc_id = self.monitor.track(proc, "command", tool, loggable(tool, cmd, short=True))
+        proc_id = self.monitor.track(proc, "command", tool, loggable(prefix, args, tool))
         timed_out = False
         try:
             stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
@@ -121,9 +119,9 @@ class PuTTYExecutor:
         so errors (auth failures, host key problems) show up in the session
         buffer and the pipe can't fill up.
         """
-        exe = self.config.get_exe(tool)
-        cmd = [str(exe)] + args
-        log.info("spawn: %s", loggable(tool, cmd))
+        prefix = self.config.command_for(tool)
+        cmd = prefix + args
+        log.info("spawn: %s", loggable(prefix, args))
 
         proc = subprocess.Popen(
             cmd,
@@ -134,16 +132,16 @@ class PuTTYExecutor:
             shell=False,
             **_POPEN_GROUP,
         )
-        return proc, self.monitor.track(proc, "session", tool, loggable(tool, cmd, short=True))
+        return proc, self.monitor.track(proc, "session", tool, loggable(prefix, args, tool))
 
     def launch_gui(self, tool: str, args: list[str]) -> dict:
         """Launch a GUI process (putty.exe, pageant) detached.
 
         Returns immediately — doesn't wait for exit.
         """
-        exe = self.config.get_exe(tool)
-        cmd = [str(exe)] + args
-        log.info("launch_gui: %s", loggable(tool, cmd))
+        prefix = self.config.command_for(tool)
+        cmd = prefix + args
+        log.info("launch_gui: %s", loggable(prefix, args))
 
         try:
             proc = subprocess.Popen(
@@ -157,7 +155,7 @@ class PuTTYExecutor:
             )
         except OSError as e:
             return {"pid": None, "success": False, "message": str(e)}
-        self.monitor.track(proc, "gui", tool, loggable(tool, cmd, short=True))
+        self.monitor.track(proc, "gui", tool, loggable(prefix, args, tool))
         return {
             "pid": proc.pid,
             "success": True,

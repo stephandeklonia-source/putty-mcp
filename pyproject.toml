@@ -6,8 +6,14 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.25.0,<3",
     "pydantic>=2.0.0",
+    "cryptography>=42",
+    "bcrypt>=4.0",
+    "argon2-cffi>=23.1",
     "tomli>=2.0.0;python_version<'3.11'",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 [project.scripts]
 putty-mcp = "putty_mcp:main"
@@ -22,3 +28,6 @@ py-modules = ["putty_mcp"]
 
 [tool.setuptools.package-data]
 putty_lib = ["monitor.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

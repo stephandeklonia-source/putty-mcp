@@ -1,9 +1,12 @@
 """PuTTY MCP Server — full PuTTY toolchain exposed as MCP tools.
 
-Covers: putty.exe, plink, pscp, psftp, pageant, puttygen.
-30 tools total: GUI launch, command execution, persistent sessions,
-file transfer, key management, saved sessions (registry), multi-hop.
-Every call is shown in a local monitor dashboard with a kill switch.
+Covers: putty.exe, plink, pscp, psftp, pageant and native key management.
+30 tools: GUI launch, command execution, persistent sessions, file
+transfer, keys, saved sessions (registry) and multi-hop SSH.
+
+The local monitor dashboard is the operator's interface: it shows every
+call live, asks for approval when the safety policy says so, takes
+passphrases and host key decisions, holds all settings and has a kill switch.
 """
 
 from __future__ import annotations
@@ -12,7 +15,10 @@ import atexit
 import functools
 import inspect
 import logging
+import os
+import re
 import time
+from datetime import date
 from typing import Any, Callable, TypeVar
 
 try:  # mcp 2.x
@@ -22,17 +28,21 @@ except ModuleNotFoundError:  # mcp 1.x (FastMCP was renamed to MCPServer in 2.0)
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
     from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
+from putty_lib import hostkeys, keys, policy, registry
+from putty_lib.approvals import HOSTKEY, SECRET, TOOL, ApprovalQueue
+from putty_lib.audit import AuditLog
 from putty_lib.config import PuTTYConfig
 from putty_lib.executor import PuTTYExecutor
 from putty_lib.monitor import Monitor, OperatorBlocked, kill_process_tree
 from putty_lib.monitor_web import MonitorServer
 from putty_lib.session_manager import InteractiveSession, SessionManager
-from putty_lib import registry
-from putty_lib.ppk import openssh_to_ppk
+from putty_lib.settings import Settings, SettingsStore, data_dir
 from putty_lib.utils import (
     build_connection_args,
     build_proxy_chain,
     build_serial_args,
+    limit_text,
+    strip_ansi,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,28 +58,73 @@ logging.basicConfig(
 )
 log = logging.getLogger("putty-mcp")
 
+DATA_DIR = data_dir()
+settings_store = SettingsStore(DATA_DIR / "settings.json", seed=config.seed_settings())
+config.set_putty_dir(settings_store.current.putty_dir)
+
+
+def current() -> Settings:
+    return settings_store.current
+
+
+audit = AuditLog(
+    DATA_DIR / "audit",
+    enabled=lambda: settings_store.current.audit_enabled,
+    retention_days=lambda: settings_store.current.audit_retention_days,
+)
 monitor = Monitor()
+monitor.event_sinks.append(audit.write)
+approvals = ApprovalQueue(emit=monitor.emit)
+monitor.on_kill_all.append(lambda: approvals.deny_all("kill switch engaged"))
 executor = PuTTYExecutor(config, monitor)
+_initial = current()
 sessions = SessionManager(
-    max_concurrent=config.sessions.max_concurrent,
-    timeout_seconds=config.sessions.timeout_seconds,
-    buffer_lines=config.sessions.buffer_lines,
+    max_concurrent=_initial.max_concurrent,
+    timeout_seconds=_initial.idle_timeout_seconds,
+    buffer_lines=_initial.buffer_lines,
 )
 monitor.attach_sessions(sessions)
+
+
+def _apply_settings(s: Settings) -> None:
+    sessions.max_concurrent = s.max_concurrent
+    sessions.timeout_seconds = s.idle_timeout_seconds
+    sessions.buffer_lines = s.buffer_lines
+    if str(config.executable_path or "") != s.putty_dir:
+        config.set_putty_dir(s.putty_dir)
+    monitor.note("Settings changed")
+
+
+settings_store.on_change(_apply_settings)
 
 monitor_server: MonitorServer | None = None
 if config.monitor.enabled:
     try:
-        monitor_server = MonitorServer(monitor, config.monitor.host, config.monitor.port)
+        monitor_server = MonitorServer(
+            monitor, approvals, settings_store, audit, config,
+            host=config.monitor.host, port=config.monitor.port,
+        )
         monitor_server.start()
     except OSError as e:
-        log.warning("Activity monitor disabled: %s", e)
+        log.warning("Monitor dashboard disabled: %s", e)
+
+
+def _on_approval_request(_approval: Any) -> None:
+    # Bring the dashboard up if nobody is looking at it
+    if monitor_server is not None and current().open_browser != "never" and not monitor_server.recently_viewed():
+        monitor_server.open_browser(force=True)
+    elif monitor_server is None:
+        log.warning("Approval needed but the monitor dashboard is disabled; the request will time out")
+
+
+approvals.on_request = _on_approval_request
 
 mcp = MCPServer("putty-mcp")
 
 
 @atexit.register
 def _shutdown() -> None:
+    approvals.deny_all("server shutting down")
     count = sessions.close_all()
     if count:
         log.info("Shutdown: closed %d sessions", count)
@@ -77,40 +132,95 @@ def _shutdown() -> None:
         monitor_server.stop()
 
 
+# ---------------------------------------------------------------------------
+# Tool wrapper: monitor, policy, approvals, output limits
+# ---------------------------------------------------------------------------
+
 _F = TypeVar("_F", bound=Callable[..., Any])
+_OUTPUT_KEYS = ("stdout", "stderr", "output")
+
+
+def _for_ai(result: Any) -> Any:
+    """Strip terminal escapes and cap output size before the AI sees it."""
+    if not isinstance(result, dict):
+        return result
+    s = current()
+    out = dict(result)
+    for key in _OUTPUT_KEYS:
+        if isinstance(out.get(key), str):
+            text = strip_ansi(out[key]) if s.strip_ansi else out[key]
+            out[key] = limit_text(text, s.max_output_chars)
+    return out
+
+
+def _session_info(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    sid = kwargs.get("session_id")
+    if not sid:
+        return None
+    try:
+        session = sessions.get(sid)
+    except KeyError:
+        return None
+    return {"host": session.host, "protocol": session.protocol}
 
 
 def tool() -> Callable[[_F], _F]:
-    """Register an MCP tool that reports to the activity monitor.
+    """Register an MCP tool behind the monitor, the policy and the kill switch.
 
-    Every call shows up in the dashboard and is refused while the operator
-    has engaged the kill switch. Exceptions become ToolErrors so the client
+    Every call shows up in the dashboard. Policy may deny it or make it wait
+    for the operator's approval. Exceptions become ToolErrors so the client
     sees the actual message (mcp 2.x hides unexpected exceptions).
     """
 
     def decorator(fn: _F) -> _F:
+        name = fn.__name__
         defaults = {
-            name: p.default
-            for name, p in inspect.signature(fn).parameters.items()
+            pname: p.default
+            for pname, p in inspect.signature(fn).parameters.items()
             if p.default is not inspect.Parameter.empty
         }
 
         @functools.wraps(fn)
         def wrapper(**kwargs: Any) -> Any:
-            if monitor_server is not None and config.monitor.open_browser == "first_call":
+            s = current()
+            if monitor_server is not None and s.open_browser == "first_call":
                 monitor_server.open_browser()
             # Show only what the caller actually chose
             shown = {k: v for k, v in kwargs.items() if k not in defaults or v != defaults[k]}
             try:
-                call_id = monitor.call_started(fn.__name__, shown)
+                call_id = monitor.call_started(name, shown)
             except OperatorBlocked as e:
                 raise ToolError(str(e)) from None
+
+            def fail(message: str) -> ToolError:
+                monitor.call_finished(call_id, error=message)
+                return ToolError(message)
+
+            decision = policy.evaluate(s, name, kwargs, _session_info(kwargs))
+            if decision.action == policy.DENY:
+                raise fail("Denied by the PuTTY MCP safety policy: " + "; ".join(decision.reasons)
+                           + ". Do not try to work around this; ask the user.")
+            if decision.action == policy.ASK:
+                monitor.call_waiting(call_id, decision.reasons)
+                approval = approvals.request(
+                    TOOL, f"{name}",
+                    {"tool": name, "args": shown, "reasons": decision.reasons},
+                    timeout=s.approval_timeout_seconds,
+                    options=decision.options,
+                )
+                monitor.call_resumed(call_id)
+                if not approval.approved:
+                    raise fail(f"Not approved by the operator ({approval.reason}). "
+                               "Do not retry this call; ask the user how to proceed.")
+                if approval.remember:
+                    settings_store.mutate(lambda st: policy.apply_remember(st, approval.remember))
+
             try:
-                result = fn(**kwargs)
+                result = _for_ai(fn(**kwargs))
+            except ToolError as e:
+                raise fail(str(e)) from None
             except Exception as e:
                 monitor.call_finished(call_id, error=f"{type(e).__name__}: {e}")
-                if isinstance(e, ToolError):
-                    raise
                 raise ToolError(str(e)) from e
             monitor.call_finished(call_id, result=result)
             return result
@@ -121,18 +231,106 @@ def tool() -> Callable[[_F], _F]:
     return decorator
 
 
-def _open_session(tool_name: str, args: list[str], host: str, protocol: str, **metadata: Any) -> InteractiveSession:
-    """Spawn a long-running process and register it as an interactive session."""
-    proc, proc_id = executor.spawn(tool_name, args)
-    try:
-        session = sessions.create(proc, host=host, protocol=protocol, **metadata)
-    except Exception:
-        # e.g. max sessions reached: don't leave the process running
-        kill_process_tree(proc)
-        monitor.untrack(proc_id)
-        raise
-    monitor.link_session(proc_id, session.session_id)
-    return session
+def _ask_secret(title: str, purpose: str, confirm: bool) -> str:
+    """Let the operator type a passphrase in the dashboard (the AI never sees it)."""
+    approval = approvals.request(
+        SECRET, title, {"purpose": purpose, "confirm": confirm},
+        timeout=max(current().approval_timeout_seconds, 120),
+    )
+    if not approval.approved or not approval.secret:
+        raise ToolError(f"No passphrase was entered in the dashboard ({approval.reason}).")
+    return approval.secret
+
+
+# ---------------------------------------------------------------------------
+# Host keys
+# ---------------------------------------------------------------------------
+
+
+def _trusted(host: str, port: int | None) -> list[str]:
+    return hostkeys.trusted_args(current().trusted_host_keys, host, port)
+
+
+def _hostkey_problem(output: str, host: str, port: int | None) -> tuple[bool, str]:
+    """Handle a host key failure. Returns (retry, message for the AI)."""
+    problem = hostkeys.detect(output)
+    if problem is None:
+        return False, ""
+    where = hostkeys.key_id(host, port)
+    if problem.kind == hostkeys.MISMATCH:
+        monitor.alert(f"HOST KEY MISMATCH for {where}: the server's key differs from the trusted key. "
+                      "This can mean a man-in-the-middle attack. The connection was refused.")
+        return False, (f"SECURITY: the host key of {where} does not match the trusted key. "
+                       "The connection was refused. Do not retry; tell the user.")
+    if current().unknown_host_key_action == "deny" or not problem.fingerprint:
+        return False, (f"The host key of {where} is unknown and was not accepted. The user can trust it "
+                       "in the PuTTY MCP dashboard (Settings → Trusted host keys).")
+    approval = approvals.request(
+        HOSTKEY, f"Unknown host key for {where}",
+        {"host": host, "port": port or 22, "key": problem.key_line, "fingerprint": problem.fingerprint},
+        timeout=current().approval_timeout_seconds,
+    )
+    if not approval.approved:
+        return False, f"The operator did not trust the host key of {where} ({approval.reason})."
+
+    def add(st: Settings) -> None:
+        fps = st.trusted_host_keys.setdefault(where, [])
+        if problem.fingerprint not in fps:
+            fps.append(problem.fingerprint)
+
+    settings_store.mutate(add)
+    return True, ""
+
+
+def _run_remote(tool_name: str, args: list[str], host: str, port: int | None, **kw: Any) -> dict:
+    """Run a connecting PuTTY tool, handling unknown host keys via the dashboard."""
+    for _ in range(2):
+        result = executor.run(tool_name, _trusted(host, port) + args, **kw)
+        if result.get("killed_by_operator"):
+            return result
+        retry, message = _hostkey_problem(result["stderr"] + result["stdout"], host, port)
+        if not retry:
+            if message:
+                result["success"] = False
+                result["hostkey"] = message
+                result["stderr"] = result["stderr"].rstrip() + "\n" + message
+            return result
+    return result
+
+
+def _open_session(
+    tool_name: str, args: list[str], host: str, protocol: str, port: int | None = None,
+    check_hostkey: bool = True, **metadata: Any,
+) -> InteractiveSession:
+    """Spawn a long-running process and register it as an interactive session.
+
+    For SSH, waits briefly to see whether plink aborts on an unknown host key;
+    if the operator trusts the key, the session is started again.
+    """
+    for _ in range(2):
+        proc, proc_id = executor.spawn(tool_name, (_trusted(host, port) if check_hostkey else []) + args)
+        try:
+            session = sessions.create(proc, host=host, protocol=protocol, **metadata)
+        except Exception:
+            # e.g. max sessions reached: don't leave the process running
+            kill_process_tree(proc)
+            monitor.untrack(proc_id)
+            raise
+        monitor.link_session(proc_id, session.session_id)
+        if not check_hostkey:
+            return session
+
+        deadline = time.time() + 3
+        while time.time() < deadline and session.alive and not hostkeys.detect(session.peek(4000)):
+            time.sleep(0.1)
+        output = session.peek(4000)
+        if not hostkeys.detect(output):
+            return session
+        sessions.close(session.session_id)
+        retry, message = _hostkey_problem(output, host, port)
+        if not retry:
+            raise ToolError(message)
+    raise ToolError(f"Could not open a session to {host}")
 
 
 # ===================================================================
@@ -161,10 +359,11 @@ def putty_open(
     log_file: str | None = None,
     log_type: str | None = None,
 ) -> dict:
-    """Launch PuTTY GUI session with full connection parameters."""
+    """Launch a PuTTY window for the user with full connection parameters."""
     args = build_connection_args(
         host=host, port=port, username=username, protocol=protocol,
-        key_file=key_file, session_name=session_name, host_keys=host_keys,
+        key_file=key_file, session_name=session_name,
+        host_keys=(host_keys or []) + _trusted(host, port)[1::2],
         use_pageant=use_pageant, verbose=verbose, compress=compress,
         x11_forward=x11_forward, agent_forward=agent_forward,
         local_forwards=local_forwards, remote_forwards=remote_forwards,
@@ -176,21 +375,26 @@ def putty_open(
 
 @tool()
 def putty_open_session(session_name: str) -> dict:
-    """Launch PuTTY GUI from a saved session name."""
+    """Launch a PuTTY window from a saved session name."""
     return executor.launch_gui("putty", ["-load", session_name])
 
 
 @tool()
 def putty_serial(
     serial_port: str,
-    baud: int = 9600,
-    data_bits: int = 8,
-    parity: str = "n",
-    stop_bits: int = 1,
-    flow_control: str = "N",
+    baud: int | None = None,
+    data_bits: int | None = None,
+    parity: str | None = None,
+    stop_bits: int | None = None,
+    flow_control: str | None = None,
 ) -> dict:
-    """Launch PuTTY GUI on a serial port."""
-    args = build_serial_args(serial_port, baud, data_bits, parity, stop_bits, flow_control)
+    """Launch a PuTTY window on a serial port (omitted settings use the dashboard defaults)."""
+    s = current()
+    args = build_serial_args(
+        serial_port,
+        baud or s.serial_baud, data_bits or s.serial_data_bits, parity or s.serial_parity,
+        stop_bits or s.serial_stop_bits, flow_control or s.serial_flow_control,
+    )
     return executor.launch_gui("putty", args)
 
 
@@ -218,7 +422,10 @@ def plink_exec(
     allocate_pty: bool | None = None,
     timeout: int = 30,
 ) -> dict:
-    """Run a single command on a remote host via plink. Returns stdout/stderr/rc."""
+    """Run a single command on a remote host via plink. Returns stdout/stderr/rc.
+
+    Unknown host keys are shown to the user in the dashboard to trust or reject.
+    """
     args = build_connection_args(
         host=host, port=port, username=username, protocol=protocol,
         key_file=key_file, session_name=session_name, host_keys=host_keys,
@@ -228,7 +435,7 @@ def plink_exec(
         batch_mode=True,
     )
     args.append(command)
-    return executor.run("plink", args, timeout=timeout)
+    return _run_remote("plink", args, host, port, timeout=timeout)
 
 
 @tool()
@@ -255,7 +462,7 @@ def plink_script(
     )
     # Insert -m before the host arg
     args[-1:-1] = ["-m", script_path]
-    return executor.run("plink", args, timeout=timeout)
+    return _run_remote("plink", args, host, port, timeout=timeout)
 
 
 @tool()
@@ -289,7 +496,7 @@ def plink_tunnel(
     args[-1:-1] = extra
 
     session = _open_session(
-        "plink", args, host=host, protocol="tunnel",
+        "plink", args, host=host, protocol="tunnel", port=port,
         forwards={
             "local": local_forwards or [],
             "remote": remote_forwards or [],
@@ -301,7 +508,9 @@ def plink_tunnel(
         "session_id": session.session_id,
         "host": host,
         "success": True,
-        "message": "Tunnel established",
+        "message": "Tunnel started" if session.alive else "Tunnel process exited",
+        "alive": session.alive,
+        "output": session.peek(4000),
     }
 
 
@@ -329,18 +538,20 @@ def session_open(
 ) -> dict:
     """Open a persistent interactive plink session (SSH/Telnet/serial/raw). Returns session_id.
 
-    For serial, host is the port (e.g. COM3) and serial_config is
-    "baud,data_bits,parity,stop_bits,flow" (omitted fields use config defaults).
+    Runs in batch mode: authentication must work without prompts (key file or
+    Pageant). For serial, host is the port (e.g. COM3) and serial_config is
+    "baud,data_bits,parity,stop_bits,flow" (omitted fields use the dashboard defaults).
     """
     if protocol == "serial":
+        s = current()
         parts = [p.strip() for p in serial_config.split(",")] if serial_config else []
         args = build_serial_args(
             host,
-            baud=int(parts[0]) if len(parts) > 0 else config.serial.baud,
-            data_bits=int(parts[1]) if len(parts) > 1 else config.serial.data_bits,
-            parity=parts[2] if len(parts) > 2 else config.serial.parity,
-            stop_bits=int(parts[3]) if len(parts) > 3 else config.serial.stop_bits,
-            flow_control=parts[4] if len(parts) > 4 else config.serial.flow_control,
+            baud=int(parts[0]) if len(parts) > 0 and parts[0] else s.serial_baud,
+            data_bits=int(parts[1]) if len(parts) > 1 and parts[1] else s.serial_data_bits,
+            parity=parts[2] if len(parts) > 2 and parts[2] else s.serial_parity,
+            stop_bits=int(parts[3]) if len(parts) > 3 and parts[3] else s.serial_stop_bits,
+            flow_control=parts[4] if len(parts) > 4 and parts[4] else s.serial_flow_control,
         )
     else:
         args = build_connection_args(
@@ -348,15 +559,17 @@ def session_open(
             key_file=key_file, session_name=session_name, host_keys=host_keys,
             use_pageant=use_pageant, verbose=verbose, compress=compress,
             x11_forward=x11_forward, agent_forward=agent_forward,
-            proxy_command=proxy_command,
+            proxy_command=proxy_command, batch_mode=True,
         )
 
-    session = _open_session("plink", args, host=host, protocol=protocol)
+    session = _open_session("plink", args, host=host, protocol=protocol, port=port,
+                            check_hostkey=protocol == "ssh")
     return {
         "session_id": session.session_id,
         "host": host,
         "protocol": protocol,
-        "success": True,
+        "success": session.alive,
+        "output": session.peek(4000),
     }
 
 
@@ -364,23 +577,31 @@ def session_open(
 def session_send(
     session_id: str,
     command: str,
-    wait_seconds: float = 1.0,
+    wait_seconds: float = 15.0,
+    quiet_seconds: float = 2.0,
+    expect: str | None = None,
+    press_enter: bool = True,
 ) -> dict:
-    """Send command to a persistent session and return new output after waiting."""
+    """Send a command to a persistent session and return the output it produced.
+
+    Returns when the shell prompt comes back, when `expect` (a regex) matches,
+    when there is no new output for quiet_seconds, or after wait_seconds at
+    most. "finished" in the result says which.
+    """
     session = sessions.get(session_id)
     if not session.alive:
-        return {"success": False, "error": "Session process has exited"}
+        return {"success": False, "error": "Session process has exited", "output": session.peek(4000)}
+    pattern = re.compile(expect, re.M) if expect else None
 
     # Capture only output produced after this command; the buffer itself
     # is kept so the monitor dashboard still shows the full history.
     mark = session.mark()
-    session.send(command + "\n")
-    time.sleep(wait_seconds)
-    output = session.read_since(mark)
+    session.send(command + ("\n" if press_enter else ""))
+    output, reason = session.wait_for_output(mark, wait_seconds, quiet_seconds, pattern, strip_ansi)
     return {
         "success": True,
-        "output": "".join(output),
-        "lines": len(output),
+        "output": output,
+        "finished": reason,
         "alive": session.alive,
     }
 
@@ -391,12 +612,10 @@ def session_read(
     last_n: int | None = None,
     clear: bool = False,
 ) -> dict:
-    """Read output buffer from a persistent session."""
+    """Read the output buffer of a persistent session (optionally the last N lines)."""
     session = sessions.get(session_id)
-    lines = session.read(last_n=last_n, clear=clear)
     return {
-        "output": "".join(lines),
-        "lines": len(lines),
+        "output": session.read(last_n=last_n, clear=clear),
         "alive": session.alive,
     }
 
@@ -427,7 +646,7 @@ def _transfer_args(
     use_pageant: bool,
 ) -> list[str]:
     """Connection args shared by pscp and psftp."""
-    args: list[str] = []
+    args: list[str] = ["-batch"]
     if key_file:
         args.extend(["-i", key_file])
     if session_name:
@@ -439,6 +658,21 @@ def _transfer_args(
     if port is not None:
         args.extend(["-P", str(port)])
     return args
+
+
+def _pscp_flags(recursive: bool, preserve: bool, force_protocol: str | None) -> list[str]:
+    flags = []
+    if recursive:
+        flags.append("-r")
+    if preserve:
+        flags.append("-p")
+    if force_protocol in ("sftp", "scp"):
+        flags.append(f"-{force_protocol}")
+    return flags
+
+
+def _remote(host: str, username: str | None, path: str) -> str:
+    return f"{username}@{host}:{path}" if username else f"{host}:{path}"
 
 
 @tool()
@@ -458,23 +692,10 @@ def pscp_upload(
     timeout: int = 120,
 ) -> dict:
     """Upload file(s) to remote host via pscp."""
-    args: list[str] = ["-batch"]
-    if recursive:
-        args.append("-r")
-    if preserve:
-        args.append("-p")
-    if force_protocol == "sftp":
-        args.append("-sftp")
-    elif force_protocol == "scp":
-        args.append("-scp")
-    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
-
-    # Source and destination
-    args.append(local_path)
-    remote = f"{username}@{host}:{remote_path}" if username else f"{host}:{remote_path}"
-    args.append(remote)
-
-    return executor.run("pscp", args, timeout=timeout)
+    args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
+    args += _pscp_flags(recursive, preserve, force_protocol)
+    args += [local_path, _remote(host, username, remote_path)]
+    return _run_remote("pscp", args, host, port, timeout=timeout)
 
 
 @tool()
@@ -494,22 +715,10 @@ def pscp_download(
     timeout: int = 120,
 ) -> dict:
     """Download file(s) from remote host via pscp."""
-    args: list[str] = ["-batch"]
-    if recursive:
-        args.append("-r")
-    if preserve:
-        args.append("-p")
-    if force_protocol == "sftp":
-        args.append("-sftp")
-    elif force_protocol == "scp":
-        args.append("-scp")
-    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
-
-    remote = f"{username}@{host}:{remote_path}" if username else f"{host}:{remote_path}"
-    args.append(remote)
-    args.append(local_path)
-
-    return executor.run("pscp", args, timeout=timeout)
+    args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
+    args += _pscp_flags(recursive, preserve, force_protocol)
+    args += [_remote(host, username, remote_path), local_path]
+    return _run_remote("pscp", args, host, port, timeout=timeout)
 
 
 @tool()
@@ -525,13 +734,9 @@ def pscp_list(
     timeout: int = 30,
 ) -> dict:
     """List remote directory via pscp -ls."""
-    args: list[str] = ["-batch", "-ls"]
-    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
-
-    remote = f"{username}@{host}:{remote_path}" if username else f"{host}:{remote_path}"
-    args.append(remote)
-
-    return executor.run("pscp", args, timeout=timeout)
+    args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
+    args += ["-ls", _remote(host, username, remote_path)]
+    return _run_remote("pscp", args, host, port, timeout=timeout)
 
 
 @tool()
@@ -547,20 +752,14 @@ def psftp_batch(
     continue_on_error: bool = False,
     timeout: int = 120,
 ) -> dict:
-    """Execute SFTP commands as a batch via psftp -b.
-
-    Commands are passed via stdin (psftp reads from pipe when no -b file).
-    """
-    args: list[str] = ["-batch"]
+    """Execute SFTP commands (put, get, ls, mkdir, ...) as a batch via psftp."""
+    args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
     if continue_on_error:
         args.append("-be")
-    args.extend(_transfer_args(port, key_file, session_name, host_keys, use_pageant))
-
-    target = f"{username}@{host}" if username else host
-    args.append(target)
+    args.append(f"{username}@{host}" if username else host)
 
     batch_input = "\n".join(commands) + "\nquit\n"
-    return executor.run("psftp", args, input_text=batch_input, timeout=timeout)
+    return _run_remote("psftp", args, host, port, input_text=batch_input, timeout=timeout)
 
 
 @tool()
@@ -573,18 +772,17 @@ def psftp_interactive(
     host_keys: list[str] | None = None,
     use_pageant: bool = True,
 ) -> dict:
-    """Open a persistent PSFTP session for multi-step SFTP workflows. Returns session_id."""
+    """Open a persistent PSFTP session for multi-step SFTP workflows (use session_send). Returns session_id."""
     args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
+    args.append(f"{username}@{host}" if username else host)
 
-    target = f"{username}@{host}" if username else host
-    args.append(target)
-
-    session = _open_session("psftp", args, host=host, protocol="sftp")
+    session = _open_session("psftp", args, host=host, protocol="sftp", port=port)
     return {
         "session_id": session.session_id,
         "host": host,
         "protocol": "sftp",
-        "success": True,
+        "success": session.alive,
+        "output": session.peek(4000),
     }
 
 
@@ -599,32 +797,56 @@ def keygen_create(
     key_type: str = "ed25519",
     bits: int | None = None,
     comment: str | None = None,
-    passphrase: str | None = None,
+    protect_with_passphrase: bool = False,
+    overwrite: bool = False,
 ) -> dict:
-    """Generate a new SSH key pair (OpenSSH + PPK format).
+    """Generate a new SSH key pair: output_path (OpenSSH private), .pub and .ppk (PuTTY).
 
-    key_type: rsa, dsa, ecdsa, ed25519
-    bits: Key size (e.g. 2048, 4096 for RSA; 256, 384, 521 for ECDSA)
-
-    Creates: output_path (OpenSSH private), output_path.pub, output_path.ppk (PuTTY).
-    The .ppk is only generated for unencrypted keys (no passphrase).
+    key_type: ed25519 (default), rsa (bits 2048-4096, default 3072) or
+    ecdsa (bits 256/384/521).
+    protect_with_passphrase: the user types the passphrase in the PuTTY MCP
+    dashboard; you never see it. Both private key files are then encrypted.
     """
-    args = ["-t", key_type, "-f", output_path, "-N", passphrase or ""]
-    if bits:
-        args.extend(["-b", str(bits)])
-    if comment:
-        args.extend(["-C", comment])
-    result = executor.run("ssh-keygen", args, timeout=30)
+    paths = {"private_key": output_path, "public_key": output_path + ".pub", "ppk": output_path + ".ppk"}
+    if not overwrite:
+        for p in paths.values():
+            if os.path.exists(p):
+                raise FileExistsError(f"{p} already exists (pass overwrite=true to replace it)")
+    key = keys.generate(key_type, bits)
+    comment = comment or f"{key_type}-key-{date.today().isoformat()}"
+    passphrase = None
+    if protect_with_passphrase:
+        passphrase = _ask_secret(
+            f"Passphrase for new {key_type} key", f"Protects {output_path} and {paths['ppk']}", confirm=True,
+        )
+    keys.write_openssh_private(paths["private_key"], key, passphrase, overwrite=True)
+    keys.write_public(paths["public_key"], key, comment, overwrite=True)
+    keys.write_ppk(paths["ppk"], key, comment, passphrase, overwrite=True)
+    blob = keys.public_blob_from_key(key)
+    return {
+        "success": True,
+        **paths,
+        "encrypted": bool(passphrase),
+        "fingerprint": keys.fingerprint(blob),
+        "public_key_line": keys.openssh_line(blob, comment),
+    }
 
-    # Auto-generate PPK for PuTTY tools (only if no passphrase)
-    if result["success"] and not passphrase:
-        try:
-            ppk_path = openssh_to_ppk(output_path)
-            result["ppk_path"] = ppk_path
-        except Exception as e:
-            result["ppk_error"] = str(e)
 
-    return result
+def _load_with_passphrase(path: str) -> keys.PrivateKey:
+    if not keys.is_encrypted(path):
+        return keys.load_private(path)
+    passphrase = _ask_secret(f"Passphrase for {os.path.basename(path)}", f"Unlocks {path}", confirm=False)
+    try:
+        return keys.load_private(path, passphrase)
+    except keys.PassphraseRequired:
+        raise ToolError("The passphrase entered in the dashboard is not correct.") from None
+
+
+def _public_of(path: str) -> tuple[bytes, str]:
+    try:
+        return keys.public_blob(path)
+    except keys.PassphraseRequired:
+        return keys.public_blob_from_key(_load_with_passphrase(path)), ""
 
 
 @tool()
@@ -632,50 +854,58 @@ def keygen_fingerprint(
     key_path: str,
     algorithm: str = "sha256",
 ) -> dict:
-    """Get fingerprint of an existing key. algorithm: sha256 or md5."""
-    args = ["-l", "-f", key_path, "-E", algorithm]
-    return executor.run("ssh-keygen", args, timeout=10)
+    """Fingerprint of a key (.pub, .ppk or private key file). algorithm: sha256 or md5."""
+    blob, comment = _public_of(key_path)
+    return {"fingerprint": keys.fingerprint(blob, algorithm), "type": keys.key_type_of(blob), "comment": comment}
 
 
 @tool()
 def keygen_convert(
     input_path: str,
     output_path: str,
-    output_format: str = "RFC4716",
-    passphrase: str | None = None,
+    output_format: str = "PPK",
+    overwrite: bool = False,
 ) -> dict:
-    """Convert/export a key to a different format.
+    """Convert a key to another format.
 
-    output_format: RFC4716, PKCS8, PEM, PPK
-    RFC4716/PKCS8/PEM export the public key (ssh-keygen -e).
-    PPK converts the (unencrypted) private key natively (no GUI needed).
+    PPK: converts an OpenSSH/PEM private key to PuTTY format. An encrypted key
+    stays encrypted with the same passphrase, which the user types in the
+    dashboard. OPENSSH, RFC4716, PKCS8, PEM: export the public key.
     """
-    if output_format.upper() == "PPK":
-        try:
-            ppk_path = openssh_to_ppk(input_path, output_path)
-            return {"success": True, "output_path": ppk_path, "format": "PPK v3"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    fmt = output_format.upper()
+    if fmt == "PPK":
+        if os.path.exists(output_path) and not overwrite:
+            raise FileExistsError(f"{output_path} already exists (pass overwrite=true to replace it)")
+        if keys.is_encrypted(input_path):
+            passphrase = _ask_secret(
+                f"Passphrase for {os.path.basename(input_path)}",
+                f"Unlocks {input_path}; {output_path} gets the same passphrase", confirm=False,
+            )
+            try:
+                key = keys.load_private(input_path, passphrase)
+            except keys.PassphraseRequired:
+                raise ToolError("The passphrase entered in the dashboard is not correct.") from None
+        else:
+            key, passphrase = keys.load_private(input_path), None
+        pub = input_path + ".pub"
+        comment = keys.read_pub_file(pub)[1] if os.path.exists(pub) else ""
+        keys.write_ppk(output_path, key, comment, passphrase, overwrite=True)
+        return {"success": True, "output_path": output_path, "format": "PPK v3", "encrypted": bool(passphrase)}
 
-    args = ["-e", "-f", input_path, "-m", output_format]
-    if passphrase:
-        args.extend(["-P", passphrase])
-    result = executor.run("ssh-keygen", args, timeout=10)
-    if result["success"] and output_path:
-        try:
-            with open(output_path, "w") as f:
-                f.write(result["stdout"])
-            result["output_path"] = output_path
-        except OSError as e:
-            result["write_error"] = str(e)
-    return result
+    blob, comment = _public_of(input_path)
+    text = keys.export_public(blob, comment, fmt)
+    if os.path.exists(output_path) and not overwrite:
+        raise FileExistsError(f"{output_path} already exists (pass overwrite=true to replace it)")
+    with open(output_path, "w", newline="\n") as f:
+        f.write(text)
+    return {"success": True, "output_path": output_path, "format": fmt, "content": text}
 
 
 @tool()
 def keygen_public_key(key_path: str) -> dict:
-    """Extract public key in OpenSSH authorized_keys format."""
-    args = ["-y", "-f", key_path]
-    return executor.run("ssh-keygen", args, timeout=10)
+    """Public key in OpenSSH authorized_keys format (from .pub, .ppk or private key)."""
+    blob, comment = _public_of(key_path)
+    return {"public_key": keys.openssh_line(blob, comment), "fingerprint": keys.fingerprint(blob)}
 
 
 @tool()
@@ -683,10 +913,10 @@ def pageant_add(
     key_paths: list[str],
     encrypted: bool = False,
 ) -> dict:
-    """Load key(s) into Pageant (launches GUI if not running).
+    """Load .ppk key(s) into Pageant (launches it if not running).
 
-    encrypted: If True, uses --encrypted for deferred decryption.
-    Accepts .ppk files. Pageant will prompt for passphrases via GUI.
+    Pageant asks the user for passphrases itself. encrypted=True uses
+    --encrypted (decrypt on first use).
     """
     args: list[str] = []
     if encrypted:
@@ -699,21 +929,18 @@ def pageant_add(
 def pageant_list() -> dict:
     """List keys currently loaded in Pageant.
 
-    Uses ssh-add -L via Pageant's OpenSSH agent compatibility.
-    Requires Pageant to be running with --openssh-config or SSH_AUTH_SOCK set.
-    Falls back to opening the Pageant key list GUI window.
+    Uses ssh-add -L via Pageant's OpenSSH agent compatibility
+    (Pageant started with --openssh-config, or SSH_AUTH_SOCK set).
+    Falls back to opening the Pageant key list window.
     """
-    # Try ssh-add first (works if Pageant is bridged to OpenSSH agent)
-    result = executor.run("ssh-add", ["-L"], timeout=5)
+    try:
+        result = executor.run("ssh-add", ["-L"], timeout=5)
+    except FileNotFoundError:
+        result = {"success": False, "stdout": ""}
     if result["success"] and result["stdout"].strip():
-        keys = [
-            line.strip()
-            for line in result["stdout"].strip().splitlines()
-            if line.strip()
-        ]
-        return {"keys": keys, "count": len(keys), "source": "ssh-add"}
+        found = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
+        return {"keys": found, "count": len(found), "source": "ssh-add"}
 
-    # Fallback: open the Pageant key list GUI
     gui_result = executor.launch_gui("pageant", ["--keylist"])
     gui_result["note"] = (
         "Could not list keys programmatically. "
@@ -727,12 +954,14 @@ def pageant_list() -> dict:
 # 6. Saved Sessions — Registry (4 tools)
 # ===================================================================
 
+_REGISTRY_OFF = "Registry tools are turned off in the dashboard settings"
+
 
 @tool()
 def saved_sessions_list() -> dict:
     """List all PuTTY saved sessions from the Windows registry."""
-    if not config.enable_registry:
-        return {"error": "Registry operations disabled in config", "sessions": []}
+    if not current().enable_registry:
+        return {"error": _REGISTRY_OFF, "sessions": []}
     try:
         names = registry.list_sessions()
         return {"sessions": names, "count": len(names)}
@@ -743,8 +972,8 @@ def saved_sessions_list() -> dict:
 @tool()
 def saved_session_get(session_name: str) -> dict:
     """Get full config of a saved PuTTY session."""
-    if not config.enable_registry:
-        return {"error": "Registry operations disabled in config"}
+    if not current().enable_registry:
+        return {"error": _REGISTRY_OFF}
     try:
         return registry.get_session(session_name)
     except (KeyError, RuntimeError) as e:
@@ -772,12 +1001,10 @@ def saved_session_create(
     scrollback_lines: int | None = None,
 ) -> dict:
     """Create or update a saved PuTTY session in the registry."""
-    if not config.enable_registry:
-        return {"error": "Registry operations disabled in config"}
+    if not current().enable_registry:
+        return {"error": _REGISTRY_OFF}
 
-    # Build params dict from non-None values
-    params: dict = {}
-    local_vars = {
+    values = {
         "host": host, "port": port, "protocol": protocol, "username": username,
         "key_file": key_file, "x11_forward": x11_forward, "agent_forward": agent_forward,
         "compression": compression, "serial_line": serial_line, "serial_speed": serial_speed,
@@ -785,10 +1012,7 @@ def saved_session_create(
         "window_rows": window_rows, "window_cols": window_cols,
         "scrollback_lines": scrollback_lines,
     }
-    for k, v in local_vars.items():
-        if v is not None:
-            params[k] = v
-
+    params = {k: v for k, v in values.items() if v is not None}
     try:
         return registry.create_session(session_name, **params)
     except RuntimeError as e:
@@ -798,8 +1022,8 @@ def saved_session_create(
 @tool()
 def saved_session_delete(session_name: str) -> dict:
     """Delete a saved PuTTY session from the registry."""
-    if not config.enable_registry:
-        return {"error": "Registry operations disabled in config"}
+    if not current().enable_registry:
+        return {"error": _REGISTRY_OFF}
     try:
         deleted = registry.delete_session(session_name)
         return {"deleted": deleted, "session_name": session_name}
@@ -823,25 +1047,21 @@ def test_connection(
     use_pageant: bool = True,
     timeout: int = 15,
 ) -> dict:
-    """Test SSH/Telnet connectivity. Returns host key fingerprint on success."""
+    """Test SSH/Telnet connectivity (SSH: logs in and runs a trivial command)."""
     if protocol == "ssh":
-        # Use plink to run a trivial command
         args = build_connection_args(
             host=host, port=port, username=username, protocol="ssh",
             key_file=key_file, host_keys=host_keys, use_pageant=use_pageant,
-            verbose=True, batch_mode=True,
+            batch_mode=True,
         )
         args.append("echo putty-mcp-test-ok")
-        result = executor.run("plink", args, timeout=timeout)
+        result = _run_remote("plink", args, host, port, timeout=timeout)
         result["test"] = "putty-mcp-test-ok" in result.get("stdout", "")
         return result
-    elif protocol == "telnet":
-        args = build_connection_args(
-            host=host, port=port, protocol="telnet", batch_mode=True,
-        )
+    if protocol == "telnet":
+        args = build_connection_args(host=host, port=port, protocol="telnet", batch_mode=True)
         return executor.run("plink", args, input_text="\n", timeout=timeout)
-    else:
-        return {"error": f"test_connection does not support protocol '{protocol}'"}
+    return {"error": f"test_connection does not support protocol '{protocol}'"}
 
 
 @tool()
@@ -850,18 +1070,23 @@ def get_host_key(
     port: int = 22,
     timeout: int = 15,
 ) -> dict:
-    """Get SSH host key fingerprint from a server.
+    """Get a server's SSH host key fingerprint without trusting it.
 
-    Useful for obtaining the -hostkey value for batch/non-interactive use.
-    Attempts connection with a dummy user; extracts key from verbose output.
+    The user can trust it in the dashboard; trusted keys are used automatically.
     """
-    args = ["-ssh", "-batch", "-v", "-P", str(port), "-noagent", host]
+    args = ["-ssh", "-batch", "-P", str(port), "-noagent", "-l", "putty-mcp-hostkey-probe", host]
     result = executor.run("plink", args, timeout=timeout)
-    # Even if connection fails (expected), verbose output contains host key
+    problem = hostkeys.detect(result["stderr"] + result["stdout"])
+    trusted = current().trusted_host_keys.get(hostkeys.key_id(host, port), [])
+    if problem and problem.kind == hostkeys.UNKNOWN:
+        return {"host": host, "port": port, "fingerprint": problem.fingerprint, "key": problem.key_line,
+                "trusted": False, "cached_by_putty": False}
     return {
-        "stdout": result["stdout"],
+        "host": host, "port": port, "trusted_fingerprints": trusted,
+        "cached_by_putty": problem is None and not trusted,
+        "note": "The key is already trusted or cached by PuTTY" if problem is None
+                else "Host key does not match the trusted key",
         "stderr": result["stderr"],
-        "note": "Look for 'Host key fingerprint is:' or 'ssh-ed25519' in output",
     }
 
 
@@ -881,18 +1106,19 @@ def proxy_session(
     use_pageant: bool = True,
     compress: bool = False,
 ) -> dict:
-    """Open interactive session through a proxy command (-proxycmd). Returns session_id."""
+    """Open an interactive session through a custom local proxy command (-proxycmd). Returns session_id."""
     args = build_connection_args(
         host=target_host, port=target_port, username=username, protocol="ssh",
         key_file=key_file, host_keys=host_keys, use_pageant=use_pageant,
-        compress=compress, proxy_command=proxy_cmd,
+        compress=compress, proxy_command=proxy_cmd, batch_mode=True,
     )
-    session = _open_session("plink", args, host=target_host, protocol="ssh-proxy")
+    session = _open_session("plink", args, host=target_host, protocol="ssh-proxy", port=target_port)
     return {
         "session_id": session.session_id,
         "host": target_host,
         "proxy_cmd": proxy_cmd,
-        "success": True,
+        "success": session.alive,
+        "output": session.peek(4000),
     }
 
 
@@ -906,13 +1132,13 @@ def chain_exec(
     key_file: str | None = None,
     timeout: int = 60,
 ) -> dict:
-    """Execute command on target through one or more jump hosts.
+    """Execute a command on target through one or more jump hosts.
 
-    jump_hosts: list of "user@host:port" strings in hop order.
-    Builds nested plink -proxycmd chain automatically.
+    jump_hosts: list of "user@host:port" strings in hop order. Trusted host
+    keys are applied to every hop.
     """
     try:
-        proxy_cmd = build_proxy_chain(jump_hosts)
+        proxy_cmd = build_proxy_chain(jump_hosts, plink=str(config.get_exe("plink")), hostkey_args=_trusted)
     except ValueError as e:
         return {"success": False, "error": str(e)}
     args = build_connection_args(
@@ -921,9 +1147,8 @@ def chain_exec(
         batch_mode=True,
     )
     args.append(command)
-    result = executor.run("plink", args, timeout=timeout)
+    result = _run_remote("plink", args, target_host, target_port, timeout=timeout)
     result["jump_hosts"] = jump_hosts
-    result["proxy_cmd"] = proxy_cmd
     return result
 
 
@@ -931,8 +1156,9 @@ def chain_exec(
 # Entry point
 # ===================================================================
 
+
 def main() -> None:
-    if monitor_server is not None and config.monitor.open_browser == "start":
+    if monitor_server is not None and current().open_browser == "start":
         monitor_server.open_browser()
     mcp.run(transport="stdio")
 

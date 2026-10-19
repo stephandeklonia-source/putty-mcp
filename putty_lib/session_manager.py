@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
+import codecs
 import logging
+import re
 import subprocess
 import threading
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
+
+# Last line looks like a shell/sftp prompt: "user@host:~$ ", "# ", "psftp> ", "C:\\>"
+_PROMPT = re.compile(r"(?:[$#>%]|\$\)|psftp>)\s?\Z")
 
 
 @dataclass
 class InteractiveSession:
-    """Wraps a Popen process with a background reader and bounded output buffer."""
+    """Wraps a Popen process with a background reader and bounded output buffer.
+
+    Output is read in chunks (not lines) so prompts without a trailing newline
+    show up immediately. Positions are absolute character counts, so mark()
+    and read_since() keep working after old output is trimmed.
+    """
 
     session_id: str
     process: subprocess.Popen
@@ -26,31 +35,46 @@ class InteractiveSession:
     metadata: dict[str, Any] = field(default_factory=dict)
     last_activity: float = field(default_factory=time.time)
 
-    _buffer: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
-    _total_lines: int = 0  # lines ever received, for mark()/read_since()
+    _text: str = ""
+    _total_chars: int = 0  # characters ever received
+    _last_output: float = 0.0
+    _buffer_lines: int = 1000
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
     _stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def start_reader(self, buffer_lines: int = 1000) -> None:
         """Start background thread reading stdout."""
-        self._buffer = deque(maxlen=buffer_lines)
+        self._buffer_lines = buffer_lines
         self._reader_thread = threading.Thread(
             target=self._read_loop, daemon=True, name=f"reader-{self.session_id[:8]}"
         )
         self._reader_thread.start()
 
     def _read_loop(self) -> None:
+        stdout = self.process.stdout
+        if stdout is None:
+            return
+        raw = getattr(stdout, "buffer", stdout)  # binary stream under the text wrapper
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
-            assert self.process.stdout is not None
-            for line in iter(self.process.stdout.readline, ""):
-                if self._stop_event.is_set():
+            while not self._stop_event.is_set():
+                chunk = raw.read1(65536) if hasattr(raw, "read1") else raw.read(1)
+                if not chunk:
                     break
-                with self._lock:
-                    self._buffer.append(line)
-                    self._total_lines += 1
+                text = decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
+                if text:
+                    self._append(text)
         except (ValueError, OSError):
             pass  # pipe closed
+
+    def _append(self, text: str) -> None:
+        with self._lock:
+            self._text += text
+            self._total_chars += len(text)
+            self._last_output = time.time()
+            if self._text.count("\n") > self._buffer_lines:
+                self._text = "".join(self._text.splitlines(keepends=True)[-self._buffer_lines:])
 
     def send(self, text: str) -> None:
         """Send text to the process stdin."""
@@ -62,34 +86,69 @@ class InteractiveSession:
         self.process.stdin.flush()
         self.last_activity = time.time()
 
-    def read(self, last_n: int | None = None, clear: bool = False) -> list[str]:
-        """Read output buffer. Optionally return only last N lines and/or clear."""
+    def read(self, last_n: int | None = None, clear: bool = False) -> str:
+        """Read the output buffer, optionally only the last N lines and/or clear it."""
         self.last_activity = time.time()
         with self._lock:
-            if last_n:
-                lines = list(self._buffer)[-last_n:]
-            else:
-                lines = list(self._buffer)
+            text = self._text
             if clear:
-                self._buffer.clear()
-        return lines
+                self._text = ""
+        if last_n:
+            text = "".join(text.splitlines(keepends=True)[-last_n:])
+        return text
 
     def mark(self) -> int:
         """Current output position, for read_since()."""
         with self._lock:
-            return self._total_lines
+            return self._total_chars
 
-    def read_since(self, mark: int) -> list[str]:
-        """Lines received after mark(), without clearing the buffer."""
+    def read_since(self, mark: int) -> str:
+        """Output received after mark(), without clearing the buffer."""
         self.last_activity = time.time()
         with self._lock:
-            new = min(self._total_lines - mark, len(self._buffer))
-            return list(self._buffer)[len(self._buffer) - new:] if new > 0 else []
+            new = self._total_chars - mark
+            if new <= 0:
+                return ""
+            return self._text[-new:] if new < len(self._text) else self._text
 
-    def peek(self, last_n: int) -> list[str]:
-        """Return the last N buffered lines without counting as activity."""
+    def wait_for_output(
+        self,
+        mark: int,
+        max_wait: float,
+        quiet: float = 2.0,
+        expect: re.Pattern[str] | None = None,
+        clean: Callable[[str], str] = lambda t: t,
+    ) -> tuple[str, str]:
+        """Wait until output after mark settles. Returns (output, reason).
+
+        reason: "expect" (pattern matched), "prompt" (output ends in something
+        that looks like a shell prompt and paused briefly), "quiet" (no new
+        output for `quiet` seconds), "exited" or "timeout".
+        """
+        deadline = time.time() + max_wait
+        while True:
+            out = self.read_since(mark)
+            if expect is not None and expect.search(clean(out)):
+                return out, "expect"
+            if not self.alive:
+                time.sleep(0.1)  # let the reader drain the pipe
+                return self.read_since(mark), "exited"
+            with self._lock:
+                last = self._last_output
+            if expect is None and out:
+                idle = time.time() - last
+                if idle >= 0.3 and _PROMPT.search(clean(out)):
+                    return out, "prompt"
+                if idle >= quiet:
+                    return out, "quiet"
+            if time.time() >= deadline:
+                return out, "timeout"
+            time.sleep(0.05)
+
+    def peek(self, last_chars: int) -> str:
+        """Return the end of the buffer without counting as activity."""
         with self._lock:
-            return list(self._buffer)[-last_n:]
+            return self._text[-last_chars:]
 
     @property
     def alive(self) -> bool:
