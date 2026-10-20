@@ -6,6 +6,12 @@ Versions use the format **YYYY.MM.rev**: the year, the month and a three-digit r
 
 pip writes versions without leading zeros (`2026.10.1`); the dashboard and this file show `2026.10.001`.
 
+## 2026.10.004
+
+- "Never ask for approval" is now always temporary. You choose 5 minutes to 8 hours; afterwards the server asks again in the mode you had before.
+- The dashboard shows a countdown banner while approvals are paused, with an *Ask again now* button that ends the pause immediately.
+- An existing "Never" setting without a time limit gets one at the next start.
+
 ## 2026.10.003
 
 - Support for CCC Prodigy controllers through CCC's TrainTools SSH utility (`ttssh`).

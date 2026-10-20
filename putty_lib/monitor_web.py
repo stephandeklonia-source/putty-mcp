@@ -237,10 +237,16 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
 
             if url.path == "/api/state":
                 server.seen()
+                if server.settings.end_pause():
+                    monitor.note(f"Approval pause ended; asking again ({server.settings.current.approval_mode})")
                 since = int(query.get("since", ["0"])[0] or 0)
                 state = monitor.snapshot(since=since)
                 state["approvals"] = server.approvals.pending()
                 state["version"] = __version__
+                state["now"] = time.time()
+                current = server.settings.current
+                state["approvals_paused_until"] = current.approval_off_until if current.approval_mode == "off" else None
+                state["approval_mode_after_pause"] = current.approval_mode_before_off
                 return self._json(state)
             if url.path == "/api/settings":
                 return self._json(server.settings_payload())
@@ -265,6 +271,12 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
             if path == "/api/lock":
                 monitor.set_locked(bool(body.get("locked")), reason="blocked by operator")
                 return self._json({"locked": monitor.locked})
+            if path == "/api/approvals/resume":
+                ended = server.settings.end_pause(force=True)
+                if ended:
+                    monitor.note(f"Approval pause cancelled by operator; asking again "
+                                 f"({server.settings.current.approval_mode})")
+                return self._json({"resumed": ended})
             if path == "/api/token/reset":
                 return self._json({"url": server.reset_token()})
             if path == "/api/approve":

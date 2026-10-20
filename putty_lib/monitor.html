@@ -45,6 +45,10 @@
   button.small { padding: 2px 10px; font-size: 13px; }
   .banner { display: none; padding: 10px 16px; background: var(--bad); color: #fff; font-weight: 600; }
   .banner.show { display: block; }
+  .banner.pause { background: var(--warn); color: #1d1300; display: none; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .banner.pause.show { display: flex; }
+  .banner.pause .clock { font: 700 18px/1 ui-monospace, Consolas, monospace; }
+  .banner.pause button { background: #1d1300; color: #fff; border-color: #1d1300; }
   .alerts { padding: 0 16px; }
   .alert { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--bad); color: #fff;
            display: flex; gap: 12px; align-items: flex-start; }
@@ -141,6 +145,12 @@
   <button id="kill-all" class="danger kill-all" type="button" title="Kill every connection and block new tool calls">KILL ALL</button>
 </header>
 <div id="banner" class="banner">Kill switch engaged: new tool calls are refused until you click “Allow tool calls”.</div>
+<div id="pause-banner" class="banner pause">
+  <span>Approvals paused: tool calls run without asking. Asking again in</span>
+  <span id="pause-clock" class="clock">--:--</span>
+  <span id="pause-detail"></span>
+  <button id="pause-cancel" type="button">Ask again now</button>
+</div>
 <div id="alerts" class="alerts"></div>
 
 <main>
@@ -177,7 +187,12 @@
             <select id="s-approval_mode" data-key="approval_mode">
               <option value="risky">Only when a rule below says so (recommended)</option>
               <option value="all">Every call that changes something</option>
-              <option value="off">Never (rules set to “ask” are allowed)</option>
+              <option value="off">Never, for a limited time (choose below)</option>
+            </select></div>
+          <div class="field" id="off-minutes-field"><label for="s-approval_off_minutes">Never ask for<div class="help">After this time the server asks again as before. The countdown is shown at the top of the dashboard.</div></label>
+            <select id="s-approval_off_minutes" data-key="approval_off_minutes" data-type="number">
+              <option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option>
+              <option value="60">1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option><option value="480">8 hours</option>
             </select></div>
           <div class="field"><label for="s-approval_timeout_seconds">Approval timeout (seconds)<div class="help">Unanswered requests are denied after this time.</div></label>
             <input id="s-approval_timeout_seconds" type="number" min="5" data-key="approval_timeout_seconds"></div>
@@ -508,7 +523,31 @@
     $("banner").classList.toggle("show", locked);
     $("lock-btn").textContent = locked ? "Allow tool calls" : "Block new tool calls";
     $("meta").textContent = `v${state.version} · PID ${state.pid} · up ${fmtAge(state.uptime)}`;
+    pauseUntil = state.approvals_paused_until;
+    pauseNext = state.approval_mode_after_pause;
+    clockOffset = state.now - Date.now() / 1000;
+    renderPause();
   }
+
+  // ------------------------------------------------------------- approval pause
+  let pauseUntil = null, pauseNext = "risky", clockOffset = 0;
+  const MODE_NAMES = { risky: "only flagged calls", all: "every call" };
+  function renderPause() {
+    const banner = $("pause-banner");
+    const left = pauseUntil ? pauseUntil - (Date.now() / 1000 + clockOffset) : 0;
+    banner.classList.toggle("show", left > 0);
+    if (left <= 0) return;
+    const h = Math.floor(left / 3600), m = Math.floor((left % 3600) / 60), sec = Math.floor(left % 60);
+    $("pause-clock").textContent = (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(sec).padStart(2, "0")}`;
+    const until = new Date((pauseUntil - clockOffset) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    $("pause-detail").textContent = `(at ${until}, back to: ask for ${MODE_NAMES[pauseNext] || pauseNext})`;
+  }
+  setInterval(renderPause, 1000);
+  $("pause-cancel").onclick = async () => {
+    try { await api("/api/approvals/resume", {}); } catch (e) { alert(e.message); }
+    poll();
+    if (activeTab === "settings" && !dirty()) loadSettings();
+  };
 
   // ------------------------------------------------------------- alerts
   const dismissed = new Set();
@@ -660,7 +699,7 @@
   const inputs = () => Array.from(document.querySelectorAll("[data-key]"));
   function readInput(inp) {
     if (inp.type === "checkbox") return inp.checked;
-    if (inp.type === "number") return inp.value === "" ? null : Number(inp.value);
+    if (inp.type === "number" || inp.dataset.type === "number") return inp.value === "" ? null : Number(inp.value);
     if (inp.dataset.type === "lines") return inp.value.split("\n").map((l) => l.trim()).filter(Boolean);
     return inp.value;
   }
@@ -695,7 +734,7 @@
     for (const inp of inputs()) writeInput(inp, loaded[inp.dataset.key]);
     rules = loaded.command_rules.map((r) => ({ ...r }));
     hostKeys = JSON.parse(JSON.stringify(loaded.trusted_host_keys));
-    renderRules(); renderHostKeys();
+    renderRules(); renderHostKeys(); toggleOffMinutes();
     const exes = $("exes");
     exes.replaceChildren(...Object.entries(data.executables).map(([name, path]) => {
       const row = el("div");
@@ -721,6 +760,11 @@
       return tr;
     }));
   }
+  function toggleOffMinutes() {
+    $("off-minutes-field").classList.toggle("hidden", $("s-approval_mode").value !== "off");
+  }
+  $("s-approval_mode").addEventListener("change", toggleOffMinutes);
+
   $("add-rule").onclick = () => { rules.push({ pattern: "", action: "ask", note: "" }); renderRules(); };
   $("restore-rules").onclick = () => { rules = defaults.command_rules.map((r) => ({ ...r })); renderRules(); };
 

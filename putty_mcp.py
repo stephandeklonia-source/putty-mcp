@@ -191,6 +191,8 @@ def tool() -> Callable[[_F], _F]:
 
         @functools.wraps(fn)
         def wrapper(**kwargs: Any) -> Any:
+            if settings_store.end_pause():
+                monitor.note(f"Approval pause ended; asking again ({current().approval_mode})")
             s = current()
             if monitor_server is not None and s.open_browser == "first_call":
                 monitor_server.open_browser()

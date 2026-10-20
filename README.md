@@ -71,7 +71,7 @@ All runtime settings live here and are saved to `settings.json`:
 
 | Section | What you set |
 |---|---|
-| Safety | When to ask (only flagged calls, every call, or never), timeout, allowed and blocked hosts (wildcards), allowed local folders, what happens with unknown hosts, local paths, proxy commands and host keys |
+| Safety | When to ask (only flagged calls, every call, or never for 5 minutes to 8 hours; a countdown banner with *Ask again now* shows while paused), timeout, allowed and blocked hosts (wildcards), allowed local folders, what happens with unknown hosts, local paths, proxy commands and host keys |
 | Command rules | Regex rules that make a command *ask* or *deny*. They come with defaults for `rm -rf`, reboot/shutdown, disk tools, stopping services, firewall, user accounts, `chmod 777`, `crontab -r` and destructive SQL, plus `reload`, `write erase` and interface shutdown, addressing or routing changes on network devices. New default rules only reach an existing `settings.json` when you click *Restore defaults* |
 | Trusted host keys | Fingerprints you trusted, with a button to remove each one |
 | Sessions and output | Max sessions, idle timeout, buffer size, max output sent to the AI, stripping terminal codes |

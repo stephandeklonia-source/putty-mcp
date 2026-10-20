@@ -64,3 +64,32 @@ def test_version_format_is_calver():
 
     year, month, rev = re.fullmatch(r"(\d{4})\.(\d{2})\.(\d{3})", __version__).groups()
     assert 1 <= int(month) <= 12 and int(rev) >= 1
+
+
+def test_never_ask_is_temporary(tmp_path):
+    import time
+
+    store = SettingsStore(tmp_path / "s.json")
+    store.update({"approval_mode": "all"})
+    s = store.update({"approval_mode": "off", "approval_off_minutes": 15})
+    assert s.approval_mode_before_off == "all"
+    assert 14 * 60 < s.approval_off_until - time.time() <= 15 * 60
+    # the end time can't be set from outside
+    assert store.update({"approval_off_until": 1.0}).approval_off_until == s.approval_off_until
+    assert store.end_pause() is False
+    assert store.end_pause(now=time.time() + 16 * 60) is True
+    assert store.current.approval_mode == "all" and store.current.approval_off_until == 0.0
+    # cancel right away
+    store.update({"approval_mode": "off"})
+    assert store.end_pause(force=True) and store.current.approval_mode == "all"
+    with pytest.raises(ValueError):
+        store.update({"approval_off_minutes": 7})
+
+
+def test_legacy_never_gets_a_time_limit(tmp_path):
+    import time
+
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"approval_mode": "off"}))
+    s = SettingsStore(path).current
+    assert s.approval_mode == "off" and s.approval_off_until > time.time()

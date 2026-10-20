@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import threading
+import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,8 @@ APPROVAL_MODES = ("risky", "all", "off")
 ACTIONS = ("ask", "allow", "deny")
 RULE_ACTIONS = ("ask", "deny")
 OPEN_BROWSER = ("first_call", "start", "never")
+# "Never ask" always ends after one of these durations (minutes)
+APPROVAL_OFF_MINUTES = (5, 15, 30, 60, 120, 240, 480)
 
 # Commands that ask for approval out of the box. The operator can edit or
 # remove them in the dashboard.
@@ -68,6 +71,11 @@ class Settings:
 
     # Safety
     approval_mode: str = "risky"
+    # "off" (never ask) is temporary: it ends at approval_off_until and the
+    # mode returns to approval_mode_before_off
+    approval_off_minutes: int = 30
+    approval_off_until: float = 0.0
+    approval_mode_before_off: str = "risky"
     approval_timeout_seconds: int = 120
     unknown_host_action: str = "ask"
     allowed_hosts: list[str] = field(default_factory=list)
@@ -117,6 +125,11 @@ def _validate(data: dict[str, Any], base: Settings) -> Settings:
         if isinstance(current, bool):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be true or false")
+        elif isinstance(current, float):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number") from None
         elif isinstance(current, int):
             if isinstance(value, bool) or not isinstance(value, int):
                 try:
@@ -143,6 +156,7 @@ def _validate(data: dict[str, Any], base: Settings) -> Settings:
         "unknown_host_key_action": ("ask", "deny"),
         "open_browser": OPEN_BROWSER,
         "ttssh_approval": ("every_command", "readonly_auto", "rules"),
+        "approval_mode_before_off": ("risky", "all"),
     }
     for key, allowed in choices.items():
         if getattr(out, key) not in allowed:
@@ -170,6 +184,8 @@ def _validate(data: dict[str, Any], base: Settings) -> Settings:
         raise ValueError("trusted_host_keys must map 'host:port' to a list of fingerprints")
     out.trusted_host_keys = {k: v for k, v in out.trusted_host_keys.items() if v}
 
+    if out.approval_off_minutes not in APPROVAL_OFF_MINUTES:
+        raise ValueError("approval_off_minutes must be one of: " + ", ".join(map(str, APPROVAL_OFF_MINUTES)))
     if out.max_concurrent < 1:
         raise ValueError("max_concurrent must be at least 1")
     if out.buffer_lines < 10:
@@ -198,6 +214,9 @@ class SettingsStore:
                 settings = _validate({k: v for k, v in stored.items() if k in known}, settings)
             except (OSError, ValueError) as e:
                 log.warning("Ignoring invalid %s: %s", path, e)
+        if settings.approval_mode == "off" and not settings.approval_off_until:
+            # "Never ask" from before it had a time limit: give it one now
+            settings.approval_off_until = time.time() + settings.approval_off_minutes * 60
         self._settings = settings
 
     @property
@@ -211,7 +230,17 @@ class SettingsStore:
 
     def update(self, changes: dict[str, Any]) -> Settings:
         with self._lock:
-            new = _validate(changes, self._settings)
+            old = self._settings
+            # The pause end time is managed here, not set from outside
+            changes = {k: v for k, v in changes.items() if k != "approval_off_until"}
+            new = _validate(changes, old)
+            if new.approval_mode == "off":
+                if old.approval_mode != "off":
+                    new.approval_mode_before_off = old.approval_mode
+                if old.approval_mode != "off" or "approval_off_minutes" in changes:
+                    new.approval_off_until = time.time() + new.approval_off_minutes * 60
+            else:
+                new.approval_off_until = 0.0
             self._settings = new
             self._save()
             snapshot = copy.deepcopy(new)
@@ -231,6 +260,24 @@ class SettingsStore:
         for listener in self._listeners:
             listener(snapshot)
         return snapshot
+
+    def end_pause(self, now: float | None = None, force: bool = False) -> bool:
+        """End "never ask" when its time is up (or now, with force). True if it ended."""
+        with self._lock:
+            s = self._settings
+            if s.approval_mode != "off":
+                return False
+            if not force and (now or time.time()) < s.approval_off_until:
+                return False
+            new = copy.deepcopy(s)
+            new.approval_mode = new.approval_mode_before_off
+            new.approval_off_until = 0.0
+            self._settings = new
+            self._save()
+            snapshot = copy.deepcopy(new)
+        for listener in self._listeners:
+            listener(snapshot)
+        return True
 
     def _save(self) -> None:
         try:

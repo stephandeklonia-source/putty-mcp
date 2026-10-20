@@ -373,3 +373,32 @@ def test_ttssh_session_and_failures(m, dash):
         call(m, "ttssh_open", {"host": "down", "connect_timeout": 5})
     with pytest.raises(m.ToolError, match="Not a valid host"):
         call(m, "ttssh_run", {"host": "-x 1.2.3.4", "commands": ["ver"]})
+
+
+def test_approval_pause_countdown_and_cancel(m, dash):
+    m.settings_store.update({"allowed_hosts": []})
+    payload = dash.post("/api/settings", {"changes": {"approval_mode": "off", "approval_off_minutes": 5}})
+    assert payload["settings"]["approval_mode"] == "off"
+    state = dash.get("/api/state")
+    assert 4 * 60 < state["approvals_paused_until"] - state["now"] <= 5 * 60
+    # paused: an unknown host runs without asking
+    assert call(m, "plink_exec", {"host": "anyhost", "command": "ls"})["success"]
+    # cancel from the dashboard: asking again immediately
+    assert dash.post("/api/approvals/resume", {})["resumed"]
+    assert dash.get("/api/state")["approvals_paused_until"] is None
+    t, box = in_thread(call, m, "plink_exec", {"host": "otherhost", "command": "ls"})
+    dash.answer(False, kind="tool")
+    t.join(10)
+    assert "Not approved" in str(box["error"])
+
+
+def test_approval_pause_expires_by_itself(m, dash):
+    import time
+
+    m.settings_store.update({"allowed_hosts": [], "approval_mode": "off"})
+    m.settings_store._settings.approval_off_until = time.time() - 1  # time is up
+    t, box = in_thread(call, m, "plink_exec", {"host": "anyhost", "command": "ls"})
+    dash.answer(True, kind="tool")
+    t.join(10)
+    assert box["value"]["success"] and m.current().approval_mode == "risky"
+    assert any("pause ended" in (e.get("message") or "") for e in dash.get("/api/state")["events"])
