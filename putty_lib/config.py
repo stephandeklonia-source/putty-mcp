@@ -1,4 +1,8 @@
-"""Configuration loading and PuTTY path auto-detection."""
+"""Start-up configuration (config.toml) and PuTTY path auto-detection.
+
+Settings that can change at runtime live in settings.py and are edited in
+the dashboard; config.toml only seeds them on the first run.
+"""
 
 from __future__ import annotations
 
@@ -15,8 +19,8 @@ except ModuleNotFoundError:
 
 
 EXECUTABLES = ["putty", "plink", "pscp", "psftp", "pageant", "puttygen"]
-# ssh-keygen is resolved separately (not in PuTTY install dir)
-SYSTEM_EXECUTABLES = ["ssh-keygen", "ssh-add"]
+# Resolved from PATH, not the PuTTY install dir (pageant_list uses ssh-add)
+SYSTEM_EXECUTABLES = ["ssh-add"]
 
 # Common install locations on Windows
 _COMMON_DIRS = [
@@ -55,8 +59,6 @@ class MonitorSettings:
 class PuTTYConfig:
     executable_path: Path | None = None
     enable_registry: bool = True
-    default_protocol: str = "ssh"
-    default_port: int = 22
     serial: SerialDefaults = field(default_factory=SerialDefaults)
     sessions: SessionDefaults = field(default_factory=SessionDefaults)
     monitor: MonitorSettings = field(default_factory=MonitorSettings)
@@ -92,10 +94,6 @@ class PuTTYConfig:
             self.executable_path = Path(putty["executable_path"])
         self.enable_registry = putty.get("enable_registry", self.enable_registry)
 
-        defaults = data.get("defaults", {})
-        self.default_protocol = defaults.get("protocol", self.default_protocol)
-        self.default_port = defaults.get("port", self.default_port)
-
         serial = data.get("serial", {})
         for key in ("baud", "data_bits", "parity", "stop_bits", "flow_control"):
             if key in serial:
@@ -119,8 +117,30 @@ class PuTTYConfig:
     # Path resolution
     # ------------------------------------------------------------------
 
+    def seed_settings(self) -> dict:
+        """Values from config.toml used to initialise settings.json."""
+        return {
+            "putty_dir": str(self.executable_path or ""),
+            "enable_registry": self.enable_registry,
+            "max_concurrent": self.sessions.max_concurrent,
+            "idle_timeout_seconds": self.sessions.timeout_seconds,
+            "buffer_lines": self.sessions.buffer_lines,
+            "serial_baud": self.serial.baud,
+            "serial_data_bits": self.serial.data_bits,
+            "serial_parity": self.serial.parity,
+            "serial_stop_bits": self.serial.stop_bits,
+            "serial_flow_control": self.serial.flow_control,
+            "open_browser": self.monitor.open_browser,
+        }
+
+    def set_putty_dir(self, putty_dir: str) -> None:
+        """Change the PuTTY directory at runtime and re-detect executables."""
+        self.executable_path = Path(putty_dir) if putty_dir else None
+        self._resolve_executables()
+
     def _resolve_executables(self) -> None:
-        """Find all PuTTY executables and system tools (ssh-keygen)."""
+        """Find all PuTTY executables and system tools (ssh-add)."""
+        self.exe_paths = {}
         base_dir = self._find_base_dir()
         for name in EXECUTABLES:
             exe_name = f"{name}.exe" if sys.platform == "win32" else name
@@ -170,11 +190,15 @@ class PuTTYConfig:
         if tool not in self.exe_paths:
             raise FileNotFoundError(
                 f"PuTTY executable '{tool}' not found. "
-                f"Set executable_path in config.toml or add PuTTY to PATH."
+                f"Set the PuTTY folder in the monitor dashboard (Settings) or add PuTTY to PATH."
             )
         return self.exe_paths[tool]
 
-    def validate(self) -> dict[str, bool]:
-        """Return which executables were found."""
+    def command_for(self, tool: str) -> list[str]:
+        """Command prefix used to run a tool (tests replace this)."""
+        return [str(self.get_exe(tool))]
+
+    def validate(self) -> dict[str, str | None]:
+        """Map each executable to its resolved path (None if missing)."""
         all_names = list(EXECUTABLES) + list(SYSTEM_EXECUTABLES)
-        return {name: name in self.exe_paths for name in all_names}
+        return {name: str(self.exe_paths[name]) if name in self.exe_paths else None for name in all_names}

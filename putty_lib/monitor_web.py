@@ -1,9 +1,10 @@
-"""Local web dashboard for the activity monitor.
+"""Local web dashboard: the operator's interface to the server.
 
-Serves a single page on 127.0.0.1 that shows tool calls, running processes
-and live session output, with kill buttons. Access requires a random token
-that is part of the URL; POST requests must also carry it in a header, so
-other websites can't trigger the kill switch (or undo it) via CSRF.
+Serves a single page on 127.0.0.1 with live activity, approvals, passphrase
+prompts, settings and the audit log. Access requires a random token that is
+part of the URL; API requests must carry it in a header, so other websites
+can't read the dashboard or press its buttons (CSRF), and the Host header is
+checked against DNS rebinding.
 """
 
 from __future__ import annotations
@@ -12,25 +13,48 @@ import json
 import logging
 import secrets
 import threading
+import time
 import webbrowser
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+from putty_lib.approvals import ApprovalQueue
+from putty_lib.audit import AuditLog
 from putty_lib.monitor import Monitor
+from putty_lib.settings import DEFAULT_COMMAND_RULES, Settings, SettingsStore
+
+if TYPE_CHECKING:
+    from putty_lib.config import PuTTYConfig
 
 log = logging.getLogger(__name__)
 
 _PAGE = Path(__file__).with_name("monitor.html")
+_MAX_BODY = 1_000_000
 
 
 class MonitorServer:
-    def __init__(self, monitor: Monitor, host: str = "127.0.0.1", port: int = 8765) -> None:
+    def __init__(
+        self,
+        monitor: Monitor,
+        approvals: ApprovalQueue,
+        settings: SettingsStore,
+        audit: AuditLog,
+        config: PuTTYConfig,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+    ) -> None:
         self.monitor = monitor
+        self.approvals = approvals
+        self.settings = settings
+        self.audit = audit
+        self.config = config
         self.token = secrets.token_urlsafe(24)
         self._opened = False
         self._open_lock = threading.Lock()
+        self._last_seen = 0.0
         handler = _make_handler(self)
         try:
             self.httpd = ThreadingHTTPServer((host, port), handler)
@@ -48,12 +72,19 @@ class MonitorServer:
 
     def start(self) -> None:
         threading.Thread(target=self.httpd.serve_forever, daemon=True, name="monitor-web").start()
-        log.info("Activity monitor: %s", self.url)
+        log.info("Monitor dashboard: %s", self.url)
 
-    def open_browser(self) -> None:
-        """Open the dashboard once per server run."""
+    def seen(self) -> None:
+        self._last_seen = time.time()
+
+    def recently_viewed(self, within: float = 5.0) -> bool:
+        """True if a dashboard tab polled recently."""
+        return time.time() - self._last_seen < within
+
+    def open_browser(self, force: bool = False) -> None:
+        """Open the dashboard (once per run, unless force)."""
         with self._open_lock:
-            if self._opened:
+            if self._opened and not force:
                 return
             self._opened = True
         try:
@@ -63,6 +94,22 @@ class MonitorServer:
 
     def stop(self) -> None:
         self.httpd.shutdown()
+
+    # -- data for the page ---------------------------------------------------
+
+    def settings_payload(self) -> dict[str, Any]:
+        from putty_lib.settings import data_dir
+
+        return {
+            "settings": self.settings.current.to_dict(),
+            "defaults": {"command_rules": DEFAULT_COMMAND_RULES, **{
+                k: v for k, v in asdict(Settings()).items() if k != "command_rules"}},
+            "executables": self.config.validate(),
+            "data_dir": str(data_dir()),
+            "settings_file": str(self.settings.path),
+            "audit_dir": str(self.audit.directory),
+            "dashboard": f"http://{self.host}:{self.port}/",
+        }
 
 
 def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
@@ -84,7 +131,11 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy",
+                             "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                             "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(body)
 
@@ -94,33 +145,52 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
         def _header_token_ok(self) -> bool:
             return secrets.compare_digest(self.headers.get("X-Monitor-Token", ""), server.token)
 
+        def _body(self) -> dict[str, Any] | None:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length > _MAX_BODY:
+                return None
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            except ValueError:
+                return None
+            return body if isinstance(body, dict) else None
+
         # -- routes --------------------------------------------------------
 
         def do_GET(self) -> None:  # noqa: N802
             if not self._host_ok():
                 return self._send(403, b"Forbidden", "text/plain")
             url = urlparse(self.path)
+            query = parse_qs(url.query)
             if url.path == "/":
-                token = parse_qs(url.query).get("token", [""])[0]
+                token = query.get("token", [""])[0]
                 if not secrets.compare_digest(token, server.token):
                     return self._send(403, b"Missing or invalid token. Use the URL from the server log.",
                                       "text/plain")
                 return self._send(200, _PAGE.read_bytes(), "text/html; charset=utf-8")
+            if not self._header_token_ok():
+                return self._json({"error": "forbidden"}, 403)
+
             if url.path == "/api/state":
-                if not self._header_token_ok():
-                    return self._json({"error": "forbidden"}, 403)
-                since = int(parse_qs(url.query).get("since", ["0"])[0] or 0)
-                return self._json(monitor.snapshot(since=since))
-            self._send(404, b"Not found", "text/plain")
+                server.seen()
+                since = int(query.get("since", ["0"])[0] or 0)
+                state = monitor.snapshot(since=since)
+                state["approvals"] = server.approvals.pending()
+                return self._json(state)
+            if url.path == "/api/settings":
+                return self._json(server.settings_payload())
+            if url.path == "/api/audit/days":
+                return self._json({"days": server.audit.days(), "directory": str(server.audit.directory)})
+            if url.path == "/api/audit":
+                return self._json({"events": server.audit.read(query.get("day", [""])[0])})
+            self._json({"error": "not found"}, 404)
 
         def do_POST(self) -> None:  # noqa: N802
             if not self._host_ok() or not self._header_token_ok():
                 return self._json({"error": "forbidden"}, 403)
-            length = int(self.headers.get("Content-Length", 0) or 0)
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
-            except ValueError:
-                return self._json({"error": "invalid JSON"}, 400)
+            body = self._body()
+            if body is None:
+                return self._json({"error": "invalid request body"}, 400)
 
             path = urlparse(self.path).path
             if path == "/api/kill":
@@ -130,6 +200,24 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
             if path == "/api/lock":
                 monitor.set_locked(bool(body.get("locked")), reason="blocked by operator")
                 return self._json({"locked": monitor.locked})
+            if path == "/api/approve":
+                remember = body.get("remember") or []
+                ok = server.approvals.decide(
+                    str(body.get("approval_id", "")),
+                    bool(body.get("approved")),
+                    remember=[str(r) for r in remember] if isinstance(remember, list) else [],
+                    secret=body.get("secret") if isinstance(body.get("secret"), str) else None,
+                )
+                return self._json({"ok": ok}, 200 if ok else 409)
+            if path == "/api/settings":
+                changes = body.get("changes")
+                if not isinstance(changes, dict):
+                    return self._json({"error": "changes must be an object"}, 400)
+                try:
+                    server.settings.update(changes)
+                except ValueError as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json(server.settings_payload())
             self._json({"error": "not found"}, 404)
 
     return Handler

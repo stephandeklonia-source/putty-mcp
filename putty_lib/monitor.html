@@ -9,42 +9,57 @@
     --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085;
     --border: #dde1e8; --accent: #2f6fde; --ok: #1f8a4c; --warn: #b7791f;
     --bad: #c62828; --term-bg: #10141b; --term-text: #d7dde8; --chip: #eef1f6;
+    --attention: #fff7e6; --attention-border: #e0a84a; --input: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0e1117; --panel: #161b22; --text: #e3e8ef; --muted: #8b95a7;
       --border: #2a313c; --accent: #6ea2ff; --ok: #4cc27e; --warn: #e0a84a;
       --bad: #ff6b6b; --term-bg: #0a0d12; --term-text: #d7dde8; --chip: #222a35;
+      --attention: #2b2416; --attention-border: #a57a2c; --input: #0e1117;
     }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px;
-           align-items: center; padding: 12px 16px; background: var(--panel);
+  header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 10px 14px;
+           align-items: center; padding: 10px 16px; background: var(--panel);
            border-bottom: 1px solid var(--border); }
-  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header h1 { font-size: 16px; margin: 0; }
   .status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); }
   .status.locked .dot { background: var(--bad); }
   .status.offline .dot { background: var(--muted); }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+               padding: 6px 10px; color: var(--muted); font-weight: 600; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
   .spacer { flex: 1; }
   button { font: inherit; border: 1px solid var(--border); background: var(--chip); color: var(--text);
            border-radius: 6px; padding: 6px 12px; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   button.danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 700; }
-  button.kill-all { padding: 10px 18px; font-size: 15px; letter-spacing: .02em; }
+  button.kill-all { padding: 9px 18px; font-size: 15px; letter-spacing: .02em; }
   button.small { padding: 2px 10px; font-size: 13px; }
   .banner { display: none; padding: 10px 16px; background: var(--bad); color: #fff; font-weight: 600; }
   .banner.show { display: block; }
-  main { display: grid; gap: 16px; padding: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .alerts { padding: 0 16px; }
+  .alert { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--bad); color: #fff;
+           display: flex; gap: 12px; align-items: flex-start; }
+  .alert span { flex: 1; }
+  .alert button { background: rgba(255,255,255,.15); border-color: transparent; color: #fff; }
+  main { padding: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
   section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
   section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
                margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--border);
-               display: flex; justify-content: space-between; align-items: center; }
+               display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .wide { grid-column: 1 / -1; }
   .empty { color: var(--muted); padding: 12px 14px; }
+  .hidden { display: none !important; }
   table { width: 100%; border-collapse: collapse; }
   td, th { text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { font-weight: 600; color: var(--muted); font-size: 12px; }
@@ -52,16 +67,16 @@
   code, pre, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
   .cmd { word-break: break-all; }
   .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; background: var(--chip);
-         font-size: 12px; font-weight: 600; }
-  .tag.ok { color: var(--ok); } .tag.running { color: var(--accent); }
-  .tag.failed, .tag.error, .tag.blocked, .tag.killed { color: var(--bad); }
-  .tag.operator { color: var(--warn); }
+         font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .tag.ok, .tag.approved { color: var(--ok); } .tag.running { color: var(--accent); }
+  .tag.failed, .tag.error, .tag.blocked, .tag.killed, .tag.denied, .tag.alert { color: var(--bad); }
+  .tag.operator, .tag.waiting { color: var(--warn); }
   .term { background: var(--term-bg); color: var(--term-text); margin: 0; padding: 12px 14px;
           height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all;
           border-radius: 0 0 8px 8px; }
   .tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--border); }
   .tabs button.active { border-color: var(--accent); color: var(--accent); }
-  .log { max-height: 520px; overflow: auto; }
+  .log { max-height: 560px; overflow: auto; }
   .ev { padding: 8px 14px; border-bottom: 1px solid var(--border); }
   .ev:last-child { border-bottom: 0; }
   .ev-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
@@ -71,42 +86,204 @@
   .args b { color: var(--text); font-weight: 600; }
   details { margin-top: 4px; }
   details pre { background: var(--term-bg); color: var(--term-text); padding: 8px 10px; border-radius: 6px;
-                max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 6px 0 0; }
+                max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 6px 0 0; }
   summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+
+  /* Approvals */
+  #approvals { display: grid; gap: 12px; margin-bottom: 16px; }
+  .approval { background: var(--attention); border: 2px solid var(--attention-border); border-radius: 10px;
+              padding: 14px 16px; }
+  .approval h3 { margin: 0 0 6px; font-size: 16px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .approval .countdown { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .approval ul { margin: 6px 0; padding-left: 20px; }
+  .approval .fp { font-size: 15px; font-weight: 700; word-break: break-all; padding: 8px 10px;
+                  background: var(--panel); border: 1px solid var(--border); border-radius: 6px; margin: 6px 0; }
+  .approval .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+  .approval label.opt { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+  .note { color: var(--muted); font-size: 13px; }
+
+  /* Forms */
+  .form { padding: 4px 14px 14px; }
+  .field { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); gap: 6px 16px;
+           padding: 10px 0; border-bottom: 1px solid var(--border); align-items: start; }
+  .field:last-child { border-bottom: 0; }
+  @media (max-width: 700px) { .field { grid-template-columns: minmax(0, 1fr); } }
+  .field > label { font-weight: 600; }
+  .field .help { color: var(--muted); font-size: 12.5px; font-weight: 400; margin-top: 2px; }
+  input[type=text], input[type=number], input[type=password], select, textarea {
+    font: inherit; color: var(--text); background: var(--input); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; width: 100%; max-width: 520px; }
+  textarea { min-height: 76px; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  input[type=number] { max-width: 140px; }
+  .rules td { padding: 4px 6px; }
+  .rules input, .rules select { max-width: none; }
+  .savebar { position: sticky; bottom: 0; display: flex; gap: 10px; align-items: center; padding: 10px 16px;
+             background: var(--panel); border-top: 1px solid var(--border); margin: 16px -16px -16px; }
+  .msg { font-weight: 600; } .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
+  .found { color: var(--ok); } .missing { color: var(--muted); }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 14px;
+             border-bottom: 1px solid var(--border); }
+  .toolbar select, .toolbar input { width: auto; }
 </style>
 </head>
 <body>
 <header>
-  <h1>PuTTY MCP Monitor</h1>
+  <h1>PuTTY MCP</h1>
   <span id="status" class="status offline"><span class="dot"></span><span id="status-text">Connecting…</span></span>
-  <span id="meta" class="mono" style="color:var(--muted)"></span>
+  <nav>
+    <button type="button" data-tab="live" class="active">Live</button>
+    <button type="button" data-tab="settings">Settings</button>
+    <button type="button" data-tab="audit">Audit log</button>
+  </nav>
   <span class="spacer"></span>
+  <span id="meta" class="mono note"></span>
   <button id="lock-btn" type="button">Block new tool calls</button>
-  <button id="kill-all" class="danger kill-all" type="button">KILL ALL</button>
+  <button id="kill-all" class="danger kill-all" type="button" title="Kill every connection and block new tool calls">KILL ALL</button>
 </header>
 <div id="banner" class="banner">Kill switch engaged: new tool calls are refused until you click “Allow tool calls”.</div>
+<div id="alerts" class="alerts"></div>
 
 <main>
-  <section>
-    <h2>Active connections &amp; processes <span id="proc-count"></span></h2>
-    <div id="procs"></div>
-  </section>
+  <div id="approvals"></div>
 
-  <section>
-    <h2>Running tool calls <span id="call-count"></span></h2>
-    <div id="calls"></div>
-  </section>
+  <!-- LIVE -->
+  <div id="tab-live" class="grid">
+    <section>
+      <h2>Active connections &amp; processes <span id="proc-count"></span></h2>
+      <div id="procs"></div>
+    </section>
+    <section>
+      <h2>Running tool calls <span id="call-count"></span></h2>
+      <div id="calls"></div>
+    </section>
+    <section class="wide">
+      <h2>Live session output</h2>
+      <div id="session-tabs" class="tabs"></div>
+      <pre id="term" class="term"></pre>
+    </section>
+    <section class="wide">
+      <h2>Activity <button id="clear-log" class="small" type="button">Clear</button></h2>
+      <div id="log" class="log"><div class="empty">No activity yet.</div></div>
+    </section>
+  </div>
 
-  <section class="wide">
-    <h2>Live session output</h2>
-    <div id="session-tabs" class="tabs"></div>
-    <pre id="term" class="term"></pre>
-  </section>
+  <!-- SETTINGS -->
+  <div id="tab-settings" class="hidden">
+    <div class="grid">
+      <section class="wide">
+        <h2>Safety</h2>
+        <div class="form">
+          <div class="field"><label for="s-approval_mode">Ask for approval<div class="help">When should a tool call wait for you?</div></label>
+            <select id="s-approval_mode" data-key="approval_mode">
+              <option value="risky">Only when a rule below says so (recommended)</option>
+              <option value="all">Every call that changes something</option>
+              <option value="off">Never (rules set to “ask” are allowed)</option>
+            </select></div>
+          <div class="field"><label for="s-approval_timeout_seconds">Approval timeout (seconds)<div class="help">Unanswered requests are denied after this time.</div></label>
+            <input id="s-approval_timeout_seconds" type="number" min="5" data-key="approval_timeout_seconds"></div>
+          <div class="field"><label for="s-allowed_hosts">Allowed hosts<div class="help">One per line. Wildcards: <code>*.example.com</code>, <code>10.0.0.*</code></div></label>
+            <textarea id="s-allowed_hosts" data-key="allowed_hosts" data-type="lines"></textarea></div>
+          <div class="field"><label for="s-unknown_host_action">Other hosts</label>
+            <select id="s-unknown_host_action" data-key="unknown_host_action">
+              <option value="ask">Ask me</option><option value="deny">Deny</option><option value="allow">Allow</option>
+            </select></div>
+          <div class="field"><label for="s-blocked_hosts">Blocked hosts<div class="help">Always denied. One per line, wildcards allowed.</div></label>
+            <textarea id="s-blocked_hosts" data-key="blocked_hosts" data-type="lines"></textarea></div>
+          <div class="field"><label for="s-allowed_local_dirs">Allowed local folders<div class="help">Folders on this computer that tools may read or write (uploads, downloads, keys, scripts). One per line.</div></label>
+            <textarea id="s-allowed_local_dirs" data-key="allowed_local_dirs" data-type="lines"></textarea></div>
+          <div class="field"><label for="s-local_path_action">Paths outside those folders</label>
+            <select id="s-local_path_action" data-key="local_path_action">
+              <option value="ask">Ask me</option><option value="deny">Deny</option><option value="allow">Allow</option>
+            </select></div>
+          <div class="field"><label for="s-proxy_command_action">Custom proxy commands<div class="help">A proxy command runs a program on this computer.</div></label>
+            <select id="s-proxy_command_action" data-key="proxy_command_action">
+              <option value="ask">Ask me</option><option value="deny">Deny</option><option value="allow">Allow</option>
+            </select></div>
+          <div class="field"><label for="s-unknown_host_key_action">Unknown host keys<div class="help">The AI can never accept a host key itself.</div></label>
+            <select id="s-unknown_host_key_action" data-key="unknown_host_key_action">
+              <option value="ask">Ask me to verify the fingerprint</option><option value="deny">Deny (trust keys here or in PuTTY)</option>
+            </select></div>
+        </div>
+      </section>
 
-  <section class="wide">
-    <h2>Activity log <button id="clear-log" class="small" type="button">Clear</button></h2>
-    <div id="log" class="log"><div class="empty">No activity yet.</div></div>
-  </section>
+      <section class="wide">
+        <h2>Command rules <span>
+          <button id="add-rule" class="small" type="button">Add rule</button>
+          <button id="restore-rules" class="small" type="button">Restore defaults</button></span></h2>
+        <div class="note" style="padding:10px 14px 0">Regular expressions, case-insensitive. Checked against commands, script lines and SFTP commands.</div>
+        <table class="rules"><thead><tr><th>Pattern</th><th style="width:120px">Action</th><th>Note</th><th style="width:60px"></th></tr></thead>
+          <tbody id="rules"></tbody></table>
+      </section>
+
+      <section class="wide">
+        <h2>Trusted host keys</h2>
+        <div id="hostkeys"></div>
+      </section>
+
+      <section>
+        <h2>Sessions &amp; output</h2>
+        <div class="form">
+          <div class="field"><label for="s-max_concurrent">Max sessions</label><input id="s-max_concurrent" type="number" min="1" data-key="max_concurrent"></div>
+          <div class="field"><label for="s-idle_timeout_seconds">Idle timeout (s)<div class="help">Close sessions without activity.</div></label><input id="s-idle_timeout_seconds" type="number" min="0" data-key="idle_timeout_seconds"></div>
+          <div class="field"><label for="s-buffer_lines">Buffer lines</label><input id="s-buffer_lines" type="number" min="10" data-key="buffer_lines"></div>
+          <div class="field"><label for="s-max_output_chars">Max output to AI (chars)<div class="help">Longer output is shortened in the middle.</div></label><input id="s-max_output_chars" type="number" min="1000" data-key="max_output_chars"></div>
+          <div class="field"><label for="s-strip_ansi">Strip terminal codes</label><input id="s-strip_ansi" type="checkbox" data-key="strip_ansi"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Serial defaults</h2>
+        <div class="form">
+          <div class="field"><label for="s-serial_baud">Baud</label><input id="s-serial_baud" type="number" data-key="serial_baud"></div>
+          <div class="field"><label for="s-serial_data_bits">Data bits</label><input id="s-serial_data_bits" type="number" data-key="serial_data_bits"></div>
+          <div class="field"><label for="s-serial_parity">Parity</label>
+            <select id="s-serial_parity" data-key="serial_parity"><option value="n">none</option><option value="o">odd</option><option value="e">even</option><option value="m">mark</option><option value="s">space</option></select></div>
+          <div class="field"><label for="s-serial_stop_bits">Stop bits</label><input id="s-serial_stop_bits" type="number" data-key="serial_stop_bits"></div>
+          <div class="field"><label for="s-serial_flow_control">Flow control</label>
+            <select id="s-serial_flow_control" data-key="serial_flow_control"><option value="N">none</option><option value="X">XON/XOFF</option><option value="R">RTS/CTS</option><option value="D">DSR/DTR</option></select></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>PuTTY</h2>
+        <div class="form">
+          <div class="field"><label for="s-putty_dir">PuTTY folder<div class="help">Empty = auto-detect (PATH, Program Files).</div></label><input id="s-putty_dir" type="text" data-key="putty_dir" placeholder="C:\Program Files\PuTTY"></div>
+          <div class="field"><label>Executables</label><div id="exes" class="mono"></div></div>
+          <div class="field"><label for="s-enable_registry">Saved-session tools<div class="help">Read and write PuTTY sessions in the Windows registry.</div></label><input id="s-enable_registry" type="checkbox" data-key="enable_registry"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Dashboard &amp; audit</h2>
+        <div class="form">
+          <div class="field"><label for="s-open_browser">Open dashboard</label>
+            <select id="s-open_browser" data-key="open_browser"><option value="first_call">On the first tool call</option><option value="start">When the server starts</option><option value="never">Never (approvals then time out unless open)</option></select></div>
+          <div class="field"><label>Desktop notifications<div class="help">Get notified of approvals when this tab is in the background.</div></label><div><button id="notify-btn" type="button" class="small">Enable</button> <span id="notify-state" class="note"></span></div></div>
+          <div class="field"><label for="s-audit_enabled">Audit log</label><input id="s-audit_enabled" type="checkbox" data-key="audit_enabled"></div>
+          <div class="field"><label for="s-audit_retention_days">Keep audit log (days)<div class="help">0 = forever.</div></label><input id="s-audit_retention_days" type="number" min="0" data-key="audit_retention_days"></div>
+          <div class="field"><label>Files</label><div id="paths" class="mono note"></div></div>
+        </div>
+      </section>
+    </div>
+    <div class="savebar">
+      <button id="save" class="primary" type="button">Save settings</button>
+      <button id="revert" type="button">Undo changes</button>
+      <span id="save-msg" class="msg"></span>
+    </div>
+  </div>
+
+  <!-- AUDIT -->
+  <div id="tab-audit" class="hidden">
+    <section>
+      <div class="toolbar">
+        <label for="audit-day">Day</label> <select id="audit-day"></select>
+        <input id="audit-filter" type="text" placeholder="Filter (tool, host, command…)" style="max-width:320px">
+        <button id="audit-refresh" type="button" class="small">Refresh</button>
+        <span id="audit-dir" class="note mono"></span>
+      </div>
+      <div id="audit-list" class="log" style="max-height:none"></div>
+    </section>
+  </div>
 </main>
 
 <script>
@@ -126,14 +303,11 @@
     if (text !== undefined && text !== null) n.textContent = String(text);
     return n;
   };
+  const button = (text, cls, onclick) => { const b = el("button", cls, text); b.type = "button"; b.onclick = onclick; return b; };
   const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString();
   const fmtAge = (s) => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
                                  : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-
-  let since = 0;
-  let selectedSession = null;
-  let locked = false;
-  const events = [];
+  const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\r(?=\n)/g;
 
   async function api(path, body) {
     const opts = { headers: { "X-Monitor-Token": token || "" } };
@@ -143,11 +317,23 @@
       opts.body = JSON.stringify(body);
     }
     const r = await fetch(path, opts);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
   }
 
-  // Highlight the parts of the arguments a human most needs to check
+  // ------------------------------------------------------------------ tabs
+  let activeTab = "live";
+  document.querySelectorAll("nav button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
+  function showTab(name) {
+    activeTab = name;
+    document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+    for (const t of ["live", "settings", "audit"]) $(`tab-${t}`).classList.toggle("hidden", t !== name);
+    if (name === "settings") loadSettings();
+    if (name === "audit") loadAuditDays();
+  }
+
+  // ------------------------------------------------------------- rendering
   const KEY_ARGS = ["command", "commands", "host", "target_host", "username", "remote_path", "local_path",
                     "jump_hosts", "proxy_command", "proxy_cmd", "local_forwards", "remote_forwards",
                     "dynamic_forwards", "session_id", "session_name", "script_path", "output_path"];
@@ -160,9 +346,7 @@
     });
     keys.forEach((k, i) => {
       if (i) box.append(document.createTextNode("  "));
-      box.append(el("span", null, `${k}=`));
-      const v = el(KEY_ARGS.includes(k) ? "b" : "span", null, JSON.stringify(args[k]));
-      box.append(v);
+      box.append(el("span", null, `${k}=`), el(KEY_ARGS.includes(k) ? "b" : "span", null, JSON.stringify(args[k])));
     });
     return box;
   }
@@ -175,101 +359,117 @@
       if (r.stdout) parts.push(r.stdout);
       if (r.output) parts.push(r.output);
       if (r.stderr) parts.push("[stderr]\n" + r.stderr);
-      if (parts.length) return parts.join("\n");
-      return JSON.stringify(r, null, 2);
+      return parts.length ? parts.join("\n") : JSON.stringify(r, null, 2);
     }
     return r === undefined ? "" : JSON.stringify(r, null, 2);
   }
 
-  function renderLog() {
-    const log = $("log");
-    log.replaceChildren();
-    if (!events.length) { log.append(el("div", "empty", "No activity yet.")); return; }
-    // Merge each call with its result so one row shows the whole story
-    const results = new Map();
-    for (const ev of events) if (ev.kind === "result") results.set(ev.call_id, ev);
+  // One row per call (merging its status updates and result) or other event
+  function eventRows(events, filter) {
+    const results = new Map(), latest = new Map(), decided = new Set();
+    for (const ev of events) {
+      if (ev.kind === "result") results.set(ev.call_id, ev);
+      if (ev.kind === "call") latest.set(ev.call_id, ev);
+      if (ev.kind === "approval" && ev.status !== "waiting") decided.add(ev.approval_id);
+    }
+    const rows = [], seenCalls = new Set();
     for (let i = events.length - 1; i >= 0; i--) {
       const ev = events[i];
       if (ev.kind === "result") continue;
-      const row = el("div", "ev");
-      const head = el("div", "ev-head");
-      head.append(el("span", "time", fmtTime(ev.time)));
       if (ev.kind === "call") {
-        const res = results.get(ev.call_id);
-        const status = ev.status === "blocked" ? "blocked" : res ? res.status : "running";
-        head.append(el("span", `tag ${status}`, status));
-        head.append(el("span", "tool mono", ev.tool));
-        if (res) head.append(el("span", "time", `${res.duration}s`));
-        row.append(head, renderArgs(ev.args));
-        if (res) {
-          const text = resultText(res);
-          if (text) {
-            const d = el("details");
-            d.append(el("summary", null, "Result"), el("pre", null, text));
-            row.append(d);
-          }
-        }
-      } else if (ev.kind === "process") {
-        // One-shot commands already appear as their tool call row
-        if (ev.ptype === "command" && ev.status !== "killed") continue;
-        head.append(el("span", `tag ${ev.status === "killed" ? "killed" : "ok"}`, `${ev.ptype} ${ev.status}`));
-        head.append(el("span", "mono", `${ev.tool} PID ${ev.pid}`));
-        row.append(head, el("div", "args mono cmd", ev.label));
-      } else if (ev.kind === "operator") {
-        head.append(el("span", "tag operator", "operator"), el("span", null, ev.message));
-        row.append(head);
+        if (seenCalls.has(ev.call_id)) continue;
+        seenCalls.add(ev.call_id);
       }
-      log.append(row);
+      if (ev.kind === "process" && ev.ptype === "command" && ev.status !== "killed") continue;
+      if (ev.kind === "approval" && ev.status === "waiting" && (ev.approval_kind === "tool" || decided.has(ev.approval_id))) continue;
+      if (filter && !JSON.stringify(ev).toLowerCase().includes(filter)) continue;
+      rows.push(renderEvent(ev, results.get(ev.call_id), latest.get(ev.call_id)));
     }
+    return rows;
+  }
+
+  function renderEvent(ev, res, latestCall) {
+    const row = el("div", "ev");
+    const head = el("div", "ev-head");
+    head.append(el("span", "time", fmtTime(ev.time)));
+    if (ev.kind === "call") {
+      const first = events.find((e) => e.kind === "call" && e.call_id === ev.call_id) || ev;
+      const status = first.status === "blocked" ? "blocked" : res ? res.status
+                     : (latestCall && latestCall.status === "waiting") ? "waiting" : "running";
+      head.append(el("span", `tag ${status}`, status), el("span", "tool mono", ev.tool));
+      if (res) head.append(el("span", "time", `${res.duration}s`));
+      row.append(head, renderArgs(ev.args));
+      const reasons = (latestCall && latestCall.reasons) || ev.reasons;
+      if (reasons && reasons.length) row.append(el("div", "note", "Needs approval: " + reasons.join("; ")));
+      if (res) {
+        const text = resultText(res);
+        if (text) { const d = el("details"); d.append(el("summary", null, "Result"), el("pre", null, text)); row.append(d); }
+      }
+    } else if (ev.kind === "process") {
+      head.append(el("span", `tag ${ev.status === "killed" ? "killed" : "ok"}`, `${ev.ptype} ${ev.status}`),
+                  el("span", "mono", `${ev.tool} PID ${ev.pid}`));
+      row.append(head, el("div", "args mono cmd", ev.label));
+    } else if (ev.kind === "approval") {
+      head.append(el("span", `tag ${ev.status}`, ev.status), el("span", null, ev.title));
+      row.append(head);
+      if (ev.reason) row.append(el("div", "note", ev.reason + (ev.remember && ev.remember.length ? ` · remembered: ${ev.remember.join(", ")}` : "")));
+    } else if (ev.kind === "alert") {
+      head.append(el("span", "tag alert", "alert"), el("span", null, ev.message));
+      row.append(head);
+    } else {
+      head.append(el("span", "tag operator", ev.kind), el("span", null, ev.message || ""));
+      row.append(head);
+    }
+    return row;
+  }
+
+  // ------------------------------------------------------------- live tab
+  let since = 0, selectedSession = null, locked = false;
+  const events = [];
+
+  function renderLog() {
+    const log = $("log");
+    const rows = eventRows(events, "");
+    log.replaceChildren(...(rows.length ? rows : [el("div", "empty", "No activity yet.")]));
   }
 
   function renderProcs(procs) {
     $("proc-count").textContent = procs.length ? String(procs.length) : "";
     const box = $("procs");
-    box.replaceChildren();
-    if (!procs.length) { box.append(el("div", "empty", "Nothing running.")); return; }
-    const t = el("table");
-    const hr = el("tr");
+    if (!procs.length) { box.replaceChildren(el("div", "empty", "Nothing running.")); return; }
+    const t = el("table"), hr = el("tr");
     ["Type", "Command", "Age", ""].forEach((h) => hr.append(el("th", null, h)));
     t.append(hr);
     for (const p of procs) {
       const tr = el("tr");
-      tr.append(el("td", null, p.kind + (p.session_id ? ` ${p.session_id}` : "")));
-      const cmd = el("td", "mono cmd", p.label);
-      tr.append(cmd, el("td", null, fmtAge(p.age_seconds)));
+      tr.append(el("td", null, p.kind + (p.session_id ? ` ${p.session_id}` : "")),
+                el("td", "mono cmd", p.label), el("td", null, fmtAge(p.age_seconds)));
       const td = el("td");
-      const b = el("button", "danger small", "Kill");
-      b.type = "button";
-      b.onclick = async () => {
+      const b = button("Kill", "danger small", async () => {
         b.disabled = true;
         try { await api("/api/kill", { proc_id: p.proc_id }); } catch (e) { alert("Kill failed: " + e.message); }
         poll();
-      };
-      td.append(b);
-      tr.append(td);
-      t.append(tr);
+      });
+      td.append(b); tr.append(td); t.append(tr);
     }
-    box.append(t);
+    box.replaceChildren(t);
   }
 
   function renderCalls(calls) {
     $("call-count").textContent = calls.length ? String(calls.length) : "";
     const box = $("calls");
-    box.replaceChildren();
-    if (!calls.length) { box.append(el("div", "empty", "Idle.")); return; }
-    for (const c of calls) {
-      const row = el("div", "ev");
-      const head = el("div", "ev-head");
-      head.append(el("span", "tag running", "running"), el("span", "tool mono", c.tool),
-                  el("span", "time", fmtAge(c.elapsed)));
+    if (!calls.length) { box.replaceChildren(el("div", "empty", "Idle.")); return; }
+    box.replaceChildren(...calls.map((c) => {
+      const row = el("div", "ev"), head = el("div", "ev-head");
+      head.append(el("span", `tag ${c.waiting ? "waiting" : "running"}`, c.waiting ? "waiting for you" : "running"),
+                  el("span", "tool mono", c.tool), el("span", "time", fmtAge(c.elapsed)));
       row.append(head, renderArgs(c.args));
-      box.append(row);
-    }
+      return row;
+    }));
   }
 
   function renderSessions(sessions) {
-    const tabs = $("session-tabs");
-    const term = $("term");
+    const tabs = $("session-tabs"), term = $("term");
     if (!sessions.find((s) => s.session_id === selectedSession)) {
       // Prefer the newest session that has output (tunnels usually have none)
       const withOutput = sessions.filter((s) => s.output);
@@ -277,35 +477,130 @@
       selectedSession = pick.length ? pick[pick.length - 1].session_id : null;
     }
     term.style.display = sessions.length ? "" : "none";
-    tabs.replaceChildren();
-    for (const s of sessions) {
-      const b = el("button", s.session_id === selectedSession ? "active" : "",
-                   `${s.host} · ${s.protocol}${s.alive ? "" : " (exited)"}`);
-      b.type = "button";
-      b.onclick = () => { selectedSession = s.session_id; poll(); };
-      tabs.append(b);
-    }
+    tabs.replaceChildren(...sessions.map((s) => button(`${s.host} · ${s.protocol}${s.alive ? "" : " (exited)"}`,
+      s.session_id === selectedSession ? "active" : "", () => { selectedSession = s.session_id; poll(); })));
     if (!sessions.length) tabs.append(el("span", "empty", "No interactive sessions."));
     const cur = sessions.find((s) => s.session_id === selectedSession);
     const atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 20;
-    // Strip ANSI escape codes from remote shells; rendered as text, never HTML
-    const text = cur ? cur.output.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/\x1b\][^\x07]*\x07/g, "") : "";
-    if (term.textContent !== text) {
-      term.textContent = text;
-      if (atBottom) term.scrollTop = term.scrollHeight;
-    }
+    // Rendered as text, never HTML
+    const text = cur ? cur.output.replace(ANSI, "") : "";
+    if (term.textContent !== text) { term.textContent = text; if (atBottom) term.scrollTop = term.scrollHeight; }
   }
 
   function renderStatus(state) {
     locked = state.locked;
-    const st = $("status");
-    st.className = "status" + (locked ? " locked" : "");
+    $("status").className = "status" + (locked ? " locked" : "");
     $("status-text").textContent = locked ? "BLOCKED" : "Live";
     $("banner").classList.toggle("show", locked);
     $("lock-btn").textContent = locked ? "Allow tool calls" : "Block new tool calls";
-    $("meta").textContent = `server PID ${state.pid} · up ${fmtAge(state.uptime)}`;
+    $("meta").textContent = `PID ${state.pid} · up ${fmtAge(state.uptime)}`;
   }
 
+  // ------------------------------------------------------------- alerts
+  const dismissed = new Set();
+  function renderAlerts() {
+    const box = $("alerts");
+    const alerts = events.filter((e) => e.kind === "alert" && !dismissed.has(e.seq));
+    box.replaceChildren(...alerts.map((a) => {
+      const d = el("div", "alert");
+      d.append(el("strong", null, fmtTime(a.time)), el("span", null, a.message),
+               button("Dismiss", "small", () => { dismissed.add(a.seq); renderAlerts(); }));
+      return d;
+    }));
+  }
+
+  // ------------------------------------------------------------- approvals
+  const cards = new Map();
+  let notified = new Set();
+
+  function approvalCard(a) {
+    const card = el("div", "approval");
+    const h = el("h3");
+    const countdown = el("span", "countdown");
+    card._countdown = countdown;
+    const d = a.details || {};
+
+    if (a.kind === "tool") {
+      h.append(el("span", null, `Allow ${d.tool}?`), countdown);
+      card.append(h);
+      const ul = el("ul");
+      (d.reasons || []).forEach((r) => ul.append(el("li", null, r)));
+      card.append(ul, renderArgs(d.args));
+      const checks = (a.options || []).map((o) => {
+        const lab = el("label", "opt"), cb = el("input");
+        cb.type = "checkbox"; cb.value = o.id;
+        lab.append(cb, document.createTextNode(o.label));
+        card.append(lab);
+        return cb;
+      });
+      const actions = el("div", "actions");
+      actions.append(
+        button("Approve", "primary", () => decide(a, true, { remember: checks.filter((c) => c.checked).map((c) => c.value) })),
+        button("Deny", "danger", () => decide(a, false)));
+      card.append(actions);
+    } else if (a.kind === "hostkey") {
+      h.append(el("span", null, `Unknown host key: ${d.host}:${d.port}`), countdown);
+      card.append(h, el("div", "note", "The server presented this key. Only trust it if it matches the fingerprint you got from the server's administrator or console — an unexpected key can mean someone is intercepting the connection."));
+      if (d.key) card.append(el("div", "mono", d.key));
+      card.append(el("div", "fp mono", d.fingerprint));
+      const actions = el("div", "actions");
+      actions.append(button("Trust and connect", "primary", () => decide(a, true)),
+                     button("Reject", "danger", () => decide(a, false)));
+      card.append(actions);
+    } else if (a.kind === "secret") {
+      h.append(el("span", null, a.title), countdown);
+      card.append(h, el("div", "note", (d.purpose || "") + " — the AI never sees what you type here."));
+      const p1 = el("input"); p1.type = "password"; p1.placeholder = "Passphrase"; p1.autocomplete = "new-password";
+      const p2 = el("input"); p2.type = "password"; p2.placeholder = "Repeat passphrase"; p2.autocomplete = "new-password";
+      const err = el("span", "msg err");
+      const wrap = el("div", "actions");
+      wrap.append(p1); if (d.confirm) wrap.append(p2);
+      card.append(wrap);
+      const ok = button("Use passphrase", "primary", () => {
+        if (!p1.value) { err.textContent = "Enter a passphrase"; return; }
+        if (d.confirm && p1.value !== p2.value) { err.textContent = "The passphrases don't match"; return; }
+        decide(a, true, { secret: p1.value }); p1.value = p2.value = "";
+      });
+      [p1, p2].forEach((p) => p.addEventListener("keydown", (e) => { if (e.key === "Enter") ok.click(); }));
+      const actions = el("div", "actions");
+      actions.append(ok, button("Cancel", "", () => decide(a, false)), err);
+      card.append(actions);
+      setTimeout(() => p1.focus(), 50);
+    }
+    return card;
+  }
+
+  async function decide(a, approved, extra = {}) {
+    const card = cards.get(a.approval_id);
+    if (card) card.querySelectorAll("button").forEach((b) => b.disabled = true);
+    try { await api("/api/approve", { approval_id: a.approval_id, approved, ...extra }); }
+    catch (e) { if (card) card.querySelectorAll("button").forEach((b) => b.disabled = false); alert(e.message); }
+    poll();
+  }
+
+  function renderApprovals(list) {
+    const box = $("approvals");
+    const ids = new Set(list.map((a) => a.approval_id));
+    for (const [id, card] of cards) if (!ids.has(id)) { card.remove(); cards.delete(id); }
+    for (const a of list) {
+      let card = cards.get(a.approval_id);
+      if (!card) { card = approvalCard(a); cards.set(a.approval_id, card); box.append(card); }
+      card._countdown.textContent = `expires in ${a.expires_in}s`;
+      if (!notified.has(a.approval_id)) { notified.add(a.approval_id); notify(a); }
+    }
+    document.title = list.length ? `(${list.length}) Approval needed · PuTTY MCP` : "PuTTY MCP Monitor";
+  }
+
+  function notify(a) {
+    try {
+      if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+        const n = new Notification("PuTTY MCP needs you", { body: a.title, tag: a.approval_id });
+        n.onclick = () => { window.focus(); n.close(); };
+      }
+    } catch (e) { /* notifications unavailable */ }
+  }
+
+  // ------------------------------------------------------------- polling
   let polling = false;
   async function poll() {
     if (polling) return;
@@ -313,15 +608,19 @@
     try {
       const s = await api(`/api/state?since=${since}`);
       for (const ev of s.events) { events.push(ev); since = Math.max(since, ev.seq); }
-      if (events.length > 500) events.splice(0, events.length - 500);
+      if (events.length > 600) events.splice(0, events.length - 600);
       renderStatus(s);
+      renderApprovals(s.approvals || []);
       renderProcs(s.processes);
       renderCalls(s.running_calls);
       renderSessions(s.sessions);
-      if (s.events.length) renderLog();
+      if (s.events.length) {
+        renderLog(); renderAlerts();
+        if (s.events.some((e) => e.kind === "operator" && e.message === "Settings changed") && activeTab === "settings" && !dirty()) loadSettings();
+      }
     } catch (e) {
       $("status").className = "status offline";
-      $("status-text").textContent = e.message.includes("403") ? "Invalid token" : "Server not reachable";
+      $("status-text").textContent = e.message.includes("forbidden") ? "Invalid token" : "Server not reachable";
     } finally {
       polling = false;
     }
@@ -337,6 +636,147 @@
     poll();
   };
   $("clear-log").onclick = () => { events.length = 0; renderLog(); };
+
+  // ------------------------------------------------------------- settings
+  let loaded = null;   // settings as last loaded from the server
+  let defaults = null;
+  let rules = [];
+  let hostKeys = {};
+
+  const inputs = () => Array.from(document.querySelectorAll("[data-key]"));
+  function readInput(inp) {
+    if (inp.type === "checkbox") return inp.checked;
+    if (inp.type === "number") return inp.value === "" ? null : Number(inp.value);
+    if (inp.dataset.type === "lines") return inp.value.split("\n").map((l) => l.trim()).filter(Boolean);
+    return inp.value;
+  }
+  function writeInput(inp, v) {
+    if (inp.type === "checkbox") inp.checked = !!v;
+    else if (inp.dataset.type === "lines") inp.value = (v || []).join("\n");
+    else inp.value = v ?? "";
+  }
+
+  function collect() {
+    const changes = {};
+    for (const inp of inputs()) {
+      const v = readInput(inp);
+      if (JSON.stringify(v) !== JSON.stringify(loaded[inp.dataset.key])) changes[inp.dataset.key] = v;
+    }
+    const r = rules.map((x) => ({ pattern: x.pattern.trim(), action: x.action, note: x.note.trim() })).filter((x) => x.pattern);
+    if (JSON.stringify(r) !== JSON.stringify(loaded.command_rules)) changes.command_rules = r;
+    if (JSON.stringify(hostKeys) !== JSON.stringify(loaded.trusted_host_keys)) changes.trusted_host_keys = hostKeys;
+    return changes;
+  }
+  const dirty = () => loaded && Object.keys(collect()).length > 0;
+
+  async function loadSettings() {
+    try {
+      const data = await api("/api/settings");
+      applySettings(data);
+    } catch (e) { $("save-msg").className = "msg err"; $("save-msg").textContent = e.message; }
+  }
+
+  function applySettings(data) {
+    loaded = data.settings; defaults = data.defaults;
+    for (const inp of inputs()) writeInput(inp, loaded[inp.dataset.key]);
+    rules = loaded.command_rules.map((r) => ({ ...r }));
+    hostKeys = JSON.parse(JSON.stringify(loaded.trusted_host_keys));
+    renderRules(); renderHostKeys();
+    const exes = $("exes");
+    exes.replaceChildren(...Object.entries(data.executables).map(([name, path]) => {
+      const row = el("div");
+      row.append(el("span", path ? "found" : "missing", path ? "✓ " : "– "), el("span", null, `${name}: ${path || "not found"}`));
+      return row;
+    }));
+    $("paths").replaceChildren(el("div", null, `Settings: ${data.settings_file}`), el("div", null, `Audit log: ${data.audit_dir}`));
+  }
+
+  function renderRules() {
+    const body = $("rules");
+    body.replaceChildren(...rules.map((r, i) => {
+      const tr = el("tr");
+      const pat = el("input"); pat.type = "text"; pat.value = r.pattern; pat.className = "mono"; pat.oninput = () => r.pattern = pat.value;
+      const act = el("select");
+      for (const [v, t] of [["ask", "Ask me"], ["deny", "Deny"]]) { const o = el("option", null, t); o.value = v; act.append(o); }
+      act.value = r.action; act.onchange = () => r.action = act.value;
+      const note = el("input"); note.type = "text"; note.value = r.note || ""; note.oninput = () => r.note = note.value;
+      const td1 = el("td"), td2 = el("td"), td3 = el("td"), td4 = el("td");
+      td1.append(pat); td2.append(act); td3.append(note);
+      td4.append(button("✕", "small", () => { rules.splice(i, 1); renderRules(); }));
+      tr.append(td1, td2, td3, td4);
+      return tr;
+    }));
+  }
+  $("add-rule").onclick = () => { rules.push({ pattern: "", action: "ask", note: "" }); renderRules(); };
+  $("restore-rules").onclick = () => { rules = defaults.command_rules.map((r) => ({ ...r })); renderRules(); };
+
+  function renderHostKeys() {
+    const box = $("hostkeys");
+    const entries = Object.entries(hostKeys).flatMap(([host, fps]) => fps.map((fp) => [host, fp]));
+    if (!entries.length) { box.replaceChildren(el("div", "empty", "No keys trusted yet. When a tool meets an unknown server, you'll be asked here to verify its fingerprint.")); return; }
+    const t = el("table"), hr = el("tr");
+    ["Host", "Fingerprint", ""].forEach((h) => hr.append(el("th", null, h)));
+    t.append(hr);
+    for (const [host, fp] of entries) {
+      const tr = el("tr"), td = el("td");
+      td.append(button("Remove", "small", () => {
+        hostKeys[host] = hostKeys[host].filter((x) => x !== fp);
+        if (!hostKeys[host].length) delete hostKeys[host];
+        renderHostKeys();
+      }));
+      tr.append(el("td", "mono", host), el("td", "mono cmd", fp), td);
+      t.append(tr);
+    }
+    box.replaceChildren(t);
+  }
+
+  $("save").onclick = async () => {
+    const msg = $("save-msg");
+    const changes = collect();
+    if (!Object.keys(changes).length) { msg.className = "msg"; msg.textContent = "Nothing changed."; return; }
+    try {
+      applySettings(await api("/api/settings", { changes }));
+      msg.className = "msg ok"; msg.textContent = "Saved.";
+    } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
+  };
+  $("revert").onclick = () => { loadSettings(); $("save-msg").textContent = ""; };
+
+  function updateNotifyState() {
+    const s = "Notification" in window ? Notification.permission : "unsupported";
+    $("notify-state").textContent = { granted: "On", denied: "Blocked in browser settings", default: "Off", unsupported: "Not supported" }[s];
+    $("notify-btn").disabled = s !== "default";
+  }
+  $("notify-btn").onclick = async () => { try { await Notification.requestPermission(); } catch (e) {} updateNotifyState(); };
+  updateNotifyState();
+
+  // ------------------------------------------------------------- audit tab
+  let auditEvents = [];
+  async function loadAuditDays() {
+    try {
+      const d = await api("/api/audit/days");
+      $("audit-dir").textContent = d.directory;
+      const sel = $("audit-day"), prev = sel.value;
+      sel.replaceChildren(...d.days.map((day) => { const o = el("option", null, day); o.value = day; return o; }));
+      if (d.days.includes(prev)) sel.value = prev;
+      if (d.days.length) loadAudit(); else $("audit-list").replaceChildren(el("div", "empty", "No audit entries yet."));
+    } catch (e) { $("audit-list").replaceChildren(el("div", "empty", e.message)); }
+  }
+  async function loadAudit() {
+    const d = await api(`/api/audit?day=${encodeURIComponent($("audit-day").value)}`);
+    auditEvents = d.events; renderAudit();
+  }
+  function renderAudit() {
+    const rows = eventRowsFor(auditEvents, $("audit-filter").value.trim().toLowerCase());
+    $("audit-list").replaceChildren(...(rows.length ? rows : [el("div", "empty", "No matching entries.")]));
+  }
+  function eventRowsFor(list, filter) {
+    // renderEvent looks up the first call status in `events`; use the audit list instead
+    const saved = events.splice(0, events.length, ...list);
+    try { return eventRows(list, filter); } finally { events.splice(0, events.length, ...saved); }
+  }
+  $("audit-day").onchange = loadAudit;
+  $("audit-filter").oninput = renderAudit;
+  $("audit-refresh").onclick = loadAuditDays;
 
   poll();
   setInterval(poll, 1000);

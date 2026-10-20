@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - run: ruff check --select F,E,W --ignore E501 .
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }}, mcp ${{ matrix.mcp }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+        mcp: ["2"]
+        include:
+          - os: ubuntu-latest
+            python: "3.13"
+            mcp: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install PuTTY tools and OpenSSH server (real SSH tests)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y putty-tools openssh-server
+      - name: Install package
+        shell: bash
+        run: |
+          if [ "${{ matrix.mcp }}" = "1" ]; then
+            pip install "mcp[cli]>=1.25,<2"
+          fi
+          pip install ".[test]"
+      - name: Run tests
+        run: python -m pytest -v

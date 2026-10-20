@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 
 def parse_host_string(host_string: str) -> dict[str, Any]:
@@ -24,8 +24,10 @@ def parse_host_string(host_string: str) -> dict[str, Any]:
     if m:
         host = m.group(1)
         port = int(m.group(2))
-    elif ":" in host and not host.startswith("["):
-        # Only split on last colon if it looks like host:port (not IPv6)
+    elif host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    elif host.count(":") == 1:
+        # Exactly one colon: host:port. More than one is a bare IPv6 address.
         parts = host.rsplit(":", 1)
         if parts[1].isdigit():
             host = parts[0]
@@ -188,12 +190,20 @@ def build_forward_args(
 _UNSAFE_PROXY_CHARS = re.compile(r'[\s"\'`;&|<>$^%]')
 
 
-def build_proxy_chain(jump_hosts: list[str]) -> str:
+def build_proxy_chain(
+    jump_hosts: list[str],
+    plink: str = "plink",
+    hostkey_args: Callable[[str, int | None], list[str]] | None = None,
+) -> str:
     """Build nested -proxycmd string for multi-hop SSH.
 
     jump_hosts: list of "user@host:port" strings in hop order.
     Returns the -proxycmd value for the outermost plink call. The last
     jump connects to PuTTY's %host:%port placeholders (the final target).
+
+    plink: path of plink.exe; backslashes become forward slashes because
+    PuTTY treats backslashes in proxy commands as escapes.
+    hostkey_args(host, port): extra -hostkey arguments for each jump.
 
     For 2 jumps [j1, j2]:
       cmd1 = plink -batch j1 -nc j2_host:j2_port
@@ -209,6 +219,9 @@ def build_proxy_chain(jump_hosts: list[str]) -> str:
             raise ValueError(f"Invalid jump host: {jh!r}")
 
     parsed = [parse_host_string(jh) for jh in jump_hosts]
+    plink = plink.replace("\\", "/")
+    if " " in plink:
+        plink = f'"{plink}"'
 
     # Build from inside out: each jump wraps the previous command
     current_cmd: str | None = None
@@ -222,7 +235,9 @@ def build_proxy_chain(jump_hosts: list[str]) -> str:
             next_host = nxt["host"]
             next_port = str(nxt["port"] or 22)
 
-        parts = ["plink", "-batch"]
+        parts = [plink, "-batch"]
+        if hostkey_args:
+            parts.extend(hostkey_args(j["host"], j["port"]))
         if current_cmd:
             escaped = current_cmd.replace('"', '\\"')
             parts.extend(["-proxycmd", f'"{escaped}"'])
@@ -234,3 +249,37 @@ def build_proxy_chain(jump_hosts: list[str]) -> str:
         current_cmd = " ".join(parts)
 
     return current_cmd or ""
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]|\r(?=\n)")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove terminal escape sequences (colours, cursor moves, titles)."""
+    return _ANSI.sub("", text)
+
+
+_PAGER_TEXT = re.compile(r"[ \t]*(?:--\s*More\s*--|<--- More --->|---\(more[^)]*\)---)[ \t]*", re.I)
+
+
+def clean_pager(text: str) -> str:
+    """Remove --More-- prompts and the backspaces devices use to erase them."""
+    text = _PAGER_TEXT.sub("", text)
+    # Each backspace erases the character before it (repeat for runs)
+    erase = re.compile(r"[^\n\x08]\x08")
+    while True:
+        new = erase.sub("", text)
+        if new == text:
+            break
+        text = new
+    return text.replace("\x08", "")
+
+
+def limit_text(text: str, max_chars: int) -> str:
+    """Keep the start and end of long output, dropping the middle."""
+    if len(text) <= max_chars:
+        return text
+    head = max_chars * 2 // 3
+    tail = max_chars - head
+    dropped = len(text) - head - tail
+    return f"{text[:head]}\n\n… [{dropped} characters omitted — output limit {max_chars}] …\n\n{text[-tail:]}"

@@ -17,7 +17,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from putty_lib.session_manager import SessionManager
@@ -95,6 +95,9 @@ class Monitor:
         self.locked = False
         self.lock_reason = ""
         self.started_at = time.time()
+        # Called with each event (audit log) and on KILL ALL (deny approvals)
+        self.event_sinks: list[Callable[[dict[str, Any]], None]] = []
+        self.on_kill_all: list[Callable[[], Any]] = []
 
     def attach_sessions(self, sessions: SessionManager) -> None:
         self._sessions = sessions
@@ -107,11 +110,23 @@ class Monitor:
         """Append an event (caller must hold the lock)."""
         event = {"seq": next(self._event_seq), "time": time.time(), "kind": kind, **data}
         self._events.append(event)
+        for sink in self.event_sinks:
+            try:
+                sink(event)
+            except Exception:  # noqa: BLE001 - a broken sink must not break tools
+                log.exception("event sink failed")
         return event
 
-    def note(self, message: str) -> None:
+    def emit(self, kind: str, **data: Any) -> None:
         with self._lock:
-            self._emit("operator", message=message)
+            self._emit(kind, **data)
+
+    def note(self, message: str) -> None:
+        self.emit("operator", message=message)
+
+    def alert(self, message: str) -> None:
+        """Something the operator must notice (e.g. a changed host key)."""
+        self.emit("alert", message=message)
 
     # ------------------------------------------------------------------
     # Tool calls
@@ -133,6 +148,21 @@ class Monitor:
             self._calls[call_id] = call
             self._emit("call", call_id=call_id, tool=tool, args=shown, status="running")
             return call_id
+
+    def call_waiting(self, call_id: int, reasons: list[str]) -> None:
+        with self._lock:
+            call = self._calls.get(call_id)
+            if call is not None:
+                call["waiting"] = True
+                self._emit("call", call_id=call_id, tool=call["tool"], args=call["args"],
+                           status="waiting", reasons=reasons)
+
+    def call_resumed(self, call_id: int) -> None:
+        with self._lock:
+            call = self._calls.get(call_id)
+            if call is not None:
+                call["waiting"] = False
+                self._emit("call", call_id=call_id, tool=call["tool"], args=call["args"], status="running")
 
     def call_finished(self, call_id: int, result: Any = None, error: str | None = None) -> None:
         with self._lock:
@@ -224,6 +254,8 @@ class Monitor:
                 tp.killed = True
             self._emit("operator", message=f"KILL SWITCH: killing {len(targets)} process(es)"
                        + ("; new tool calls are blocked" if lock else ""))
+        for callback in self.on_kill_all:
+            callback()
         # Kill first so close_all() doesn't wait on graceful termination
         for tp in targets:
             kill_process_tree(tp.process)
@@ -241,7 +273,7 @@ class Monitor:
     # Snapshot for the dashboard
     # ------------------------------------------------------------------
 
-    def snapshot(self, since: int = 0, session_lines: int = 200) -> dict[str, Any]:
+    def snapshot(self, since: int = 0, session_chars: int = 20000) -> dict[str, Any]:
         with self._lock:
             self._prune()
             events = [e for e in self._events if e["seq"] > since]
@@ -271,10 +303,10 @@ class Monitor:
         if self._sessions is not None:
             for info in self._sessions.list_sessions():
                 try:
-                    lines = self._sessions.get(info["session_id"]).peek(session_lines)
+                    output = self._sessions.get(info["session_id"]).peek(session_chars)
                 except KeyError:
                     continue
-                sessions_out.append({**info, "output": _truncate("".join(lines), 20000)})
+                sessions_out.append({**info, "output": output})
         return {
             **state,
             "events": events,

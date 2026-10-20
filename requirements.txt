@@ -1,3 +1,6 @@
 mcp[cli]>=1.25.0,<3
 pydantic>=2.0.0
 tomli>=2.0.0;python_version<"3.11"
+cryptography>=42
+bcrypt>=4.0
+argon2-cffi>=23.1
