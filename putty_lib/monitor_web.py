@@ -5,13 +5,21 @@ prompts, settings and the audit log. Access requires a random token that is
 part of the URL; API requests must carry it in a header, so other websites
 can't read the dashboard or press its buttons (CSRF), and the Host header is
 checked against DNS rebinding.
+
+The token is stored in the data directory (owner-only) so the dashboard link
+and open tabs keep working when the server restarts; the operator can reset
+it from the Settings tab.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import secrets
+import socket
+import sys
 import threading
 import time
 import webbrowser
@@ -33,6 +41,54 @@ log = logging.getLogger(__name__)
 
 _PAGE = Path(__file__).with_name("monitor.html")
 _MAX_BODY = 1_000_000
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,}$")
+
+_INVALID_TOKEN_PAGE = b"""<!doctype html><meta charset="utf-8"><title>PuTTY MCP</title>
+<body style="font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px">
+<h1 style="font-size:20px">This dashboard link is not valid</h1>
+<p>The PuTTY MCP server on this port does not accept this link. Usually the link is from
+before the dashboard link was reset, or another PuTTY MCP server answers on this port.</p>
+<p>Open the dashboard from the tab the server opens on its first tool call, or copy the
+"Monitor dashboard" URL from the MCP server log.</p></body>"""
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    if sys.platform == "win32":
+        # On Windows SO_REUSEADDR lets a second process listen on the same
+        # port, so requests could reach another server instance. Claim the
+        # port exclusively instead; a second instance falls back to a free port.
+        allow_reuse_address = False
+
+        def server_bind(self) -> None:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+
+def _load_token(path: Path | None) -> str:
+    """Reuse the stored token, or create and store a new one."""
+    if path is not None:
+        try:
+            token = path.read_text(encoding="ascii").strip()
+            if _TOKEN_RE.match(token):
+                return token
+        except (OSError, UnicodeDecodeError):
+            pass
+    return _store_token(path, secrets.token_urlsafe(32))
+
+
+def _store_token(path: Path | None, token: str) -> str:
+    if path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as f:
+                f.write(token)
+            os.replace(tmp, path)
+        except OSError as e:
+            log.warning("Could not store dashboard token in %s: %s", path, e)
+    return token
 
 
 class MonitorServer:
@@ -45,24 +101,25 @@ class MonitorServer:
         config: PuTTYConfig,
         host: str = "127.0.0.1",
         port: int = 8765,
+        token_file: Path | None = None,
     ) -> None:
         self.monitor = monitor
         self.approvals = approvals
         self.settings = settings
         self.audit = audit
         self.config = config
-        self.token = secrets.token_urlsafe(24)
+        self.token_file = token_file
+        self.token = _load_token(token_file)
         self._opened = False
         self._open_lock = threading.Lock()
         self._last_seen = 0.0
         handler = _make_handler(self)
         try:
-            self.httpd = ThreadingHTTPServer((host, port), handler)
+            self.httpd = _Server((host, port), handler)
         except OSError:
             # Port taken (e.g. a second MCP client runs its own server):
             # fall back to any free port.
-            self.httpd = ThreadingHTTPServer((host, 0), handler)
-        self.httpd.daemon_threads = True
+            self.httpd = _Server((host, 0), handler)
         self.host, self.port = self.httpd.server_address[:2]
         self._allowed_hosts = {f"{h}:{self.port}" for h in ("127.0.0.1", "localhost", str(self.host))}
 
@@ -73,6 +130,12 @@ class MonitorServer:
     def start(self) -> None:
         threading.Thread(target=self.httpd.serve_forever, daemon=True, name="monitor-web").start()
         log.info("Monitor dashboard: %s", self.url)
+
+    def reset_token(self) -> str:
+        """Invalidate the current dashboard link and return the new URL."""
+        self.token = _store_token(self.token_file, secrets.token_urlsafe(32))
+        self.monitor.note("Dashboard link was reset")
+        return self.url
 
     def seen(self) -> None:
         self._last_seen = time.time()
@@ -165,8 +228,7 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
             if url.path == "/":
                 token = query.get("token", [""])[0]
                 if not secrets.compare_digest(token, server.token):
-                    return self._send(403, b"Missing or invalid token. Use the URL from the server log.",
-                                      "text/plain")
+                    return self._send(403, _INVALID_TOKEN_PAGE, "text/html; charset=utf-8")
                 return self._send(200, _PAGE.read_bytes(), "text/html; charset=utf-8")
             if not self._header_token_ok():
                 return self._json({"error": "forbidden"}, 403)
@@ -200,6 +262,8 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
             if path == "/api/lock":
                 monitor.set_locked(bool(body.get("locked")), reason="blocked by operator")
                 return self._json({"locked": monitor.locked})
+            if path == "/api/token/reset":
+                return self._json({"url": server.reset_token()})
             if path == "/api/approve":
                 remember = body.get("remember") or []
                 ok = server.approvals.decide(
