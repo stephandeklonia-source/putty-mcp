@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+from putty_lib import __version__
 from putty_lib.approvals import ApprovalQueue
 from putty_lib.audit import AuditLog
 from putty_lib.monitor import Monitor
@@ -172,6 +173,7 @@ class MonitorServer:
             "settings_file": str(self.settings.path),
             "audit_dir": str(self.audit.directory),
             "dashboard": f"http://{self.host}:{self.port}/",
+            "version": __version__,
         }
 
 
@@ -238,6 +240,7 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
                 since = int(query.get("since", ["0"])[0] or 0)
                 state = monitor.snapshot(since=since)
                 state["approvals"] = server.approvals.pending()
+                state["version"] = __version__
                 return self._json(state)
             if url.path == "/api/settings":
                 return self._json(server.settings_payload())

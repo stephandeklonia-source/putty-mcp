@@ -46,3 +46,21 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path):
     path = tmp_path / "s.json"
     path.write_text("{not json")
     assert SettingsStore(path).current.approval_mode == "risky"
+
+
+def test_version_has_changelog_entry():
+    from pathlib import Path
+
+    from putty_lib import __version__
+
+    changelog = (Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## {__version__}\n" in changelog
+
+
+def test_version_format_is_calver():
+    import re
+
+    from putty_lib import __version__
+
+    year, month, rev = re.fullmatch(r"(\d{4})\.(\d{2})\.(\d{3})", __version__).groups()
+    assert 1 <= int(month) <= 12 and int(rev) >= 1

@@ -154,6 +154,8 @@ pip install ".[test]"
 python -m pytest
 ```
 
+**Versions** use the format `YYYY.MM.rev` (for example `2026.10.001`). Every change raises `__version__` in `putty_lib/__init__.py` and adds an entry to [CHANGELOG.md](CHANGELOG.md); CI checks both. The dashboard header shows the running version.
+
 The tests use a fake plink, so they run anywhere. When `plink`, `sshd` and `ssh-keygen` are installed, they also run against a real SSH server. When `puttygen` is installed, it checks every PPK file the server writes. CI runs on Linux and Windows.
 
 ## Project layout
