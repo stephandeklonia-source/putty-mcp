@@ -218,3 +218,50 @@ def test_exited_session_is_explained_not_lost(m):
     assert call(m, "session_read", {"session_id": sid})["alive"] is False
     with pytest.raises(m.ToolError, match="Known sessions:.*shell_run"):
         call(m, "session_read", {"session_id": "doesnotexist"})
+
+
+def _monitor_server(m, token_file, port=0):
+    from putty_lib.monitor_web import MonitorServer
+
+    return MonitorServer(m.monitor, m.approvals, m.settings_store, m.audit, m.config, port=port, token_file=token_file)
+
+
+def test_dashboard_token_survives_restart_and_can_be_reset(m, tmp_path):
+    import os
+    import sys
+
+    token_file = tmp_path / "dashboard-token"
+    first = _monitor_server(m, token_file)
+    second = _monitor_server(m, token_file)  # e.g. after a restart
+    try:
+        assert first.token == second.token and len(first.token) >= 32
+        if sys.platform != "win32":
+            assert oct(os.stat(token_file).st_mode & 0o777) == "0o600"
+        old = first.token
+        assert first.reset_token().endswith(first.token) and first.token != old
+        assert _monitor_server(m, token_file).token == first.token
+    finally:
+        first.httpd.server_close()
+        second.httpd.server_close()
+
+
+def test_reset_link_via_dashboard(m, dash):
+    old = dash.srv.token
+    url = dash.post("/api/token/reset", {})["url"]
+    assert dash.srv.token in url and dash.srv.token != old
+    status, body = dash.request(f"/?token={old}", headers={})
+    assert status == 403
+    assert dash.request("/api/state", headers={"X-Monitor-Token": old})[0] == 403
+    assert dash.get("/api/state")["locked"] is False  # the new token works
+
+
+def test_second_server_cannot_share_the_port(m, tmp_path):
+    first = _monitor_server(m, tmp_path / "t")
+    try:
+        second = _monitor_server(m, tmp_path / "t", port=first.port)
+        try:
+            assert second.port != first.port  # fell back to a free port
+        finally:
+            second.httpd.server_close()
+    finally:
+        first.httpd.server_close()

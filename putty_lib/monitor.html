@@ -261,6 +261,7 @@
           <div class="field"><label>Desktop notifications<div class="help">Get notified of approvals when this tab is in the background.</div></label><div><button id="notify-btn" type="button" class="small">Enable</button> <span id="notify-state" class="note"></span></div></div>
           <div class="field"><label for="s-audit_enabled">Audit log</label><input id="s-audit_enabled" type="checkbox" data-key="audit_enabled"></div>
           <div class="field"><label for="s-audit_retention_days">Keep audit log (days)<div class="help">0 = forever.</div></label><input id="s-audit_retention_days" type="number" min="0" data-key="audit_retention_days"></div>
+          <div class="field"><label>Dashboard link<div class="help">The link survives server restarts. Reset it if someone else may have seen it; open tabs then stop working.</div></label><div><button id="reset-token" type="button" class="small">Reset link</button></div></div>
           <div class="field"><label>Files</label><div id="paths" class="mono note"></div></div>
         </div>
       </section>
@@ -746,6 +747,14 @@
     $("notify-state").textContent = { granted: "On", denied: "Blocked in browser settings", default: "Off", unsupported: "Not supported" }[s];
     $("notify-btn").disabled = s !== "default";
   }
+  $("reset-token").onclick = async () => {
+    if (!confirm("Create a new dashboard link? Other open dashboard tabs will stop working.")) return;
+    try {
+      const { url } = await api("/api/token/reset", {});
+      try { sessionStorage.removeItem("putty-mcp-token"); } catch (e) {}
+      location.replace(url);
+    } catch (e) { alert(e.message); }
+  };
   $("notify-btn").onclick = async () => { try { await Notification.requestPermission(); } catch (e) {} updateNotifyState(); };
   updateNotifyState();
 

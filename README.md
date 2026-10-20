@@ -50,7 +50,9 @@ python -c "import mcp.server.mcpserver; print('mcp 2.x OK')"
 
 ![Dashboard with an approval request](docs/monitor.png)
 
-The dashboard opens in your browser the first time a tool is called. It also opens again when an approval is waiting and no dashboard tab is open. It listens only on `127.0.0.1` and needs a random token that is in its URL. The token is new on every server start, and the full URL appears in the server log.
+The dashboard opens in your browser the first time a tool is called. It also opens again when an approval is waiting and no dashboard tab is open. It listens only on `127.0.0.1` and needs a random token that is in its URL. The token is stored in the data folder (`dashboard-token`, readable only by you), so the link, bookmarks and open tabs keep working after a restart. *Settings → Reset link* creates a new token and makes old links stop working. The full URL also appears in the server log.
+
+When two PuTTY MCP servers run at the same time (for example one for Cowork and one for Claude Code), the second gets its own free port and its own dashboard tab.
 
 ### Live
 

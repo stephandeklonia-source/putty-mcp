@@ -104,6 +104,7 @@ if config.monitor.enabled:
         monitor_server = MonitorServer(
             monitor, approvals, settings_store, audit, config,
             host=config.monitor.host, port=config.monitor.port,
+            token_file=DATA_DIR / "dashboard-token",
         )
         monitor_server.start()
     except OSError as e:
