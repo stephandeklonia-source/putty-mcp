@@ -1,6 +1,6 @@
 [project]
 name = "putty-mcp"
-version = "1.0.0"
+dynamic = ["version"]
 description = "MCP server exposing the full PuTTY toolchain"
 requires-python = ">=3.10"
 dependencies = [
@@ -25,6 +25,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["putty_lib"]
 py-modules = ["putty_mcp"]
+
+[tool.setuptools.dynamic]
+version = {attr = "putty_lib.__version__"}
 
 [tool.setuptools.package-data]
 putty_lib = ["monitor.html"]

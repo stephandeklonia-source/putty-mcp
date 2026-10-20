@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # mcp 1.x (FastMCP was renamed to MCPServer in 2.0)
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
     from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
-from putty_lib import hostkeys, keys, policy, registry
+from putty_lib import __version__, hostkeys, keys, policy, registry
 from putty_lib.approvals import HOSTKEY, SECRET, TOOL, ApprovalQueue
 from putty_lib.audit import AuditLog
 from putty_lib.config import PuTTYConfig
@@ -58,6 +58,7 @@ logging.basicConfig(
     format="%(name)s %(levelname)s: %(message)s",
 )
 log = logging.getLogger("putty-mcp")
+log.info("PuTTY MCP %s", __version__)
 
 DATA_DIR = data_dir()
 settings_store = SettingsStore(DATA_DIR / "settings.json", seed=config.seed_settings())
@@ -121,7 +122,10 @@ def _on_approval_request(_approval: Any) -> None:
 
 approvals.on_request = _on_approval_request
 
-mcp = MCPServer("putty-mcp")
+try:
+    mcp = MCPServer("putty-mcp", version=__version__)
+except TypeError:  # older mcp 1.x FastMCP has no version argument
+    mcp = MCPServer("putty-mcp")
 
 
 @atexit.register

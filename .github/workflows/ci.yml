@@ -16,6 +16,40 @@ jobs:
       - run: pip install ruff
       - run: ruff check --select F,E,W --ignore E501 .
 
+  version:
+    name: version bumped
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Code changes must raise the version (YYYY.MM.rev) and add a changelog entry
+        run: |
+          base="origin/${{ github.base_ref }}"
+          if git diff --quiet "$base"...HEAD -- putty_mcp.py putty_lib pyproject.toml requirements.txt; then
+            echo "No code changes; version bump not required"
+            exit 0
+          fi
+          get() { sed -n 's/^__version__ = "\(.*\)"/\1/p'; }
+          old=$(git show "$base:putty_lib/__init__.py" | get)
+          new=$(get < putty_lib/__init__.py)
+          echo "base version: ${old:-none}, this PR: $new"
+          python3 - "$old" "$new" <<'PY' || exit 1
+          import sys
+          parse = lambda v: tuple(int(x) for x in v.split(".")) if v else (0,)
+          old, new = sys.argv[1], sys.argv[2]
+          import re
+          if not re.fullmatch(r"\d{4}\.(0[1-9]|1[0-2])\.\d{3}", new) or new.endswith(".000"):
+              print(f"::error::Version {new} is not in the YYYY.MM.rev format (e.g. 2026.10.001).")
+              sys.exit(1)
+          if parse(new) <= parse(old):
+              print(f"::error::Code changed but the version was not raised ({old} -> {new}). "
+                    "Raise __version__ in putty_lib/__init__.py and add a CHANGELOG.md entry.")
+              sys.exit(1)
+          PY
+          grep -q "^## $new\$" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## $new' entry"; exit 1; }
+
   test:
     name: test (${{ matrix.os }}, py${{ matrix.python }}, mcp ${{ matrix.mcp }})
     runs-on: ${{ matrix.os }}
