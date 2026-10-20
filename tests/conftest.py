@@ -23,6 +23,7 @@ os.environ["PUTTY_MCP_HOME"] = str(_HOME)
 (_HOME / "settings.json").write_text(json.dumps({"open_browser": "never"}))
 
 FAKE_PLINK = str(Path(__file__).with_name("fake_plink.py"))
+FAKE_TTSSH = str(Path(__file__).with_name("fake_ttssh.py"))
 
 
 @pytest.fixture(scope="session")
@@ -40,6 +41,8 @@ def m(server, monkeypatch, tmp_path):
     def fake(tool: str) -> list[str]:
         if tool in ("plink", "pscp", "psftp", "putty", "pageant"):
             return [sys.executable, FAKE_PLINK]
+        if tool == "ttssh":
+            return [sys.executable, FAKE_TTSSH]
         return real(tool)
 
     monkeypatch.setattr(server.config, "command_for", fake)

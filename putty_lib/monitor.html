@@ -254,6 +254,19 @@
       </section>
 
       <section>
+        <h2>CCC Prodigy (TrainTools SSH)</h2>
+        <div class="form">
+          <div class="field"><label for="s-ttssh_path">ttssh program<div class="help">Empty = find <code>ttssh</code> on PATH. Shown under Executables when found.</div></label><input id="s-ttssh_path" type="text" data-key="ttssh_path" placeholder="C:\Program Files\CCC\ttssh.exe"></div>
+          <div class="field"><label for="s-ttssh_approval">Prodigy commands<div class="help">Prodigy controllers run compressors; be strict.</div></label>
+            <select id="s-ttssh_approval" data-key="ttssh_approval">
+              <option value="every_command">Ask me for every command (recommended)</option>
+              <option value="readonly_auto">Read-only commands (ver, ls, cat, df, ping, …) without asking</option>
+              <option value="rules">Only the command rules above</option>
+            </select></div>
+        </div>
+      </section>
+
+      <section>
         <h2>Dashboard &amp; audit</h2>
         <div class="form">
           <div class="field"><label for="s-open_browser">Open dashboard</label>

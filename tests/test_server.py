@@ -10,7 +10,7 @@ from conftest import call, in_thread
 def test_tools_are_registered(server):
     import asyncio
 
-    assert len(asyncio.run(server.mcp.list_tools())) == 32
+    assert len(asyncio.run(server.mcp.list_tools())) == 34
 
 
 def test_exec_and_output_cleanup(m):
@@ -315,3 +315,61 @@ def test_net_check_respects_host_policy(m, dash):
     a = dash.answer(False, kind="tool")
     t.join(10)
     assert "not on the allowed list" in a["details"]["reasons"][0]
+
+
+def test_ttssh_trust_key_then_run_with_approvals(m, dash):
+    import hashlib
+
+    host = "10.8.100.10"
+    fp = "SHA1:" + hashlib.sha1(host.encode()).hexdigest()
+    t, box = in_thread(call, m, "ttssh_run", {"host": host, "commands": ["ver", "ls /"]})
+    a = dash.answer(True, kind="tool")  # default: every Prodigy command needs approval
+    assert "every command needs approval" in a["details"]["reasons"][0]
+    k = dash.answer(True, kind="hostkey")
+    t.join(20)
+    assert k["details"]["fingerprint"] == fp
+    r = box["value"]
+    assert r["success"] and r["completed"] == 2, r
+    assert "Prodigy firmware 6.2.1" in r["results"][0]["output"]
+    assert m.current().trusted_host_keys[f"ttssh/{host}"] == [fp]
+    # the controller session was closed afterwards
+    assert all(s["protocol"] != "ttssh" for s in call(m, "session_list", {})["sessions"])
+
+
+def test_ttssh_readonly_auto_mode(m, dash):
+    import hashlib
+
+    host = "prodigy-2"
+    m.settings_store.update({"ttssh_approval": "readonly_auto", "trusted_host_keys": {
+        f"ttssh/{host}": ["SHA1:" + hashlib.sha1(host.encode()).hexdigest()]}})
+    r = call(m, "ttssh_run", {"host": host, "commands": ["ver", "date", "help"]})
+    assert r["success"]  # read-only: no approval needed
+    t, box = in_thread(call, m, "ttssh_run", {"host": host, "commands": ["ver", "reboot"]})
+    a = dash.answer(False, kind="tool")
+    t.join(10)
+    assert "not a read-only command: reboot" in " ".join(a["details"]["reasons"])
+    assert "Not approved" in str(box["error"])
+
+
+def test_ttssh_changed_key_is_refused_before_any_command(m, dash):
+    m.settings_store.update({"ttssh_approval": "rules",
+                             "trusted_host_keys": {"ttssh/10.8.100.10": ["SHA1:" + "0" * 40]}})
+    with pytest.raises(m.ToolError, match="SECURITY"):
+        call(m, "ttssh_run", {"host": "10.8.100.10", "commands": ["ver"]})
+    assert any(e["kind"] == "alert" and "Prodigy" in e["message"] for e in dash.get("/api/state")["events"])
+
+
+def test_ttssh_session_and_failures(m, dash):
+    import hashlib
+
+    host = "prodigy-3"
+    m.settings_store.update({"ttssh_approval": "rules", "trusted_host_keys": {
+        f"ttssh/{host}": ["SHA1:" + hashlib.sha1(host.encode()).hexdigest()]}})
+    sid = call(m, "ttssh_open", {"host": host})["session_id"]
+    r = call(m, "session_send", {"session_id": sid, "command": "ver"})
+    assert r["finished"] == "prompt" and "6.2.1" in r["output"]
+    call(m, "session_close", {"session_id": sid})
+    with pytest.raises(m.ToolError, match="did not reach its prompt"):
+        call(m, "ttssh_open", {"host": "down", "connect_timeout": 5})
+    with pytest.raises(m.ToolError, match="Not a valid host"):
+        call(m, "ttssh_run", {"host": "-x 1.2.3.4", "commands": ["ver"]})

@@ -33,6 +33,22 @@ _NO_HOST_CHECK = {"putty_serial", "saved_session_create", "saved_session_delete"
 
 _LOCAL_PATH_ARGS = ("local_path", "script_path", "output_path", "input_path", "key_path", "key_file", "log_file")
 
+# TrainTools SSH (CCC Prodigy) commands that only read state. In approval
+# mode "readonly_auto" these run without asking; everything else asks.
+PRODIGY_READONLY = {"ver", "mver", "ls", "pwd", "cd", "cat", "df", "stat", "lstat", "statvfs",
+                    "pathconf", "ping", "host", "infs", "pci", "help"}
+# Read-only only without arguments (with arguments they set the clock)
+PRODIGY_READONLY_NO_ARGS = {"date", "clock", "rtc"}
+
+
+def prodigy_readonly(command: str) -> bool:
+    parts = command.split()
+    if not parts:
+        return True  # just Enter
+    verb = parts[0].lower()
+    return verb in PRODIGY_READONLY or (verb in PRODIGY_READONLY_NO_ARGS and len(parts) == 1)
+
+
 # psftp commands and which arguments are local paths ("all" = every argument)
 _PSFTP_LOCAL = {"put": [0], "reput": [0], "mput": "all", "get": [1], "reget": [1], "mget": [], "lcd": [0]}
 
@@ -165,6 +181,16 @@ def evaluate(
         if kwargs.get(key) and settings.proxy_command_action != ALLOW:
             d.escalate(settings.proxy_command_action,
                        f"custom proxy command runs on this computer: {kwargs[key]}")
+
+    # -- CCC Prodigy controllers (turbomachinery control) ----------------------
+    is_prodigy = tool == "ttssh_run" or (
+        tool == "session_send" and session is not None and session.get("protocol") == "ttssh")
+    if is_prodigy and settings.ttssh_approval == "every_command":
+        d.escalate(ASK, "Prodigy controller: every command needs approval (Settings → CCC Prodigy)")
+    elif is_prodigy and settings.ttssh_approval == "readonly_auto":
+        changing = [c for c in _commands_of(tool, kwargs, session) if not prodigy_readonly(c)]
+        if changing:
+            d.escalate(ASK, "Prodigy controller: not a read-only command: " + ", ".join(changing)[:300])
 
     # -- Risky tools and approval mode -----------------------------------------
     if tool in _RISKY_TOOLS:

@@ -78,3 +78,20 @@ def test_apply_remember():
     s = Settings()
     policy.apply_remember(s, ["host:web01", "dir:/data", "host:web01", "bogus:x"])
     assert s.allowed_hosts == ["web01"] and s.allowed_local_dirs == ["/data"]
+
+
+def test_prodigy_approval_modes():
+    from putty_lib.policy import prodigy_readonly
+
+    assert prodigy_readonly("ver") and prodigy_readonly("cat /cfg/a") and prodigy_readonly("date")
+    assert not prodigy_readonly("date 2026-01-01") and not prodigy_readonly("reboot")
+    every = Settings(allowed_hosts=["*"])
+    assert decide(settings=every, tool="ttssh_run", host="p", commands=["ver"]).action == "ask"
+    auto = Settings(allowed_hosts=["*"], ttssh_approval="readonly_auto")
+    assert decide(settings=auto, tool="ttssh_run", host="p", commands=["ver", "ls"]).action == "allow"
+    assert decide(settings=auto, tool="ttssh_run", host="p", commands=["ver", "flash x"]).action == "ask"
+    assert decide(settings=auto, tool="session_send", session_id="s", command="rm /x",
+                  session={"host": "p", "protocol": "ttssh"}).action == "ask"
+    rules = Settings(allowed_hosts=["*"], ttssh_approval="rules")
+    assert decide(settings=rules, tool="ttssh_run", host="p", commands=["ver"]).action == "allow"
+    assert decide(settings=rules, tool="ttssh_run", host="p", commands=["reboot"]).action == "ask"

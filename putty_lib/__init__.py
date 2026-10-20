@@ -3,7 +3,7 @@
 # Single source of the version (pyproject.toml reads it). Format YYYY.MM.rev:
 # year, month and a 3-digit revision that restarts at 001 each month.
 # Raise it with every change and add a CHANGELOG.md entry; CI checks both.
-__version__ = "2026.10.002"
+__version__ = "2026.10.003"
 
 from putty_lib.config import PuTTYConfig
 from putty_lib.executor import PuTTYExecutor
