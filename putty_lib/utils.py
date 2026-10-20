@@ -259,6 +259,22 @@ def strip_ansi(text: str) -> str:
     return _ANSI.sub("", text)
 
 
+_PAGER_TEXT = re.compile(r"[ \t]*(?:--\s*More\s*--|<--- More --->|---\(more[^)]*\)---)[ \t]*", re.I)
+
+
+def clean_pager(text: str) -> str:
+    """Remove --More-- prompts and the backspaces devices use to erase them."""
+    text = _PAGER_TEXT.sub("", text)
+    # Each backspace erases the character before it (repeat for runs)
+    erase = re.compile(r"[^\n\x08]\x08")
+    while True:
+        new = erase.sub("", text)
+        if new == text:
+            break
+        text = new
+    return text.replace("\x08", "")
+
+
 def limit_text(text: str, max_chars: int) -> str:
     """Keep the start and end of long output, dropping the middle."""
     if len(text) <= max_chars:

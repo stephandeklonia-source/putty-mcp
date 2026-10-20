@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -13,6 +14,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
+
+# How long a session whose process exited stays visible (with its output)
+KEEP_EXITED_SECONDS = 600
+
+# Pager prompts that wait for a key (Cisco/Juniper/less)
+PAGER = re.compile(r"(?:--\s*More\s*--|<--- More --->|---\(more[^)]*\)---)\s*\Z", re.I)
 
 # Last line looks like a shell/sftp prompt: "user@host:~$ ", "# ", "psftp> ", "C:\\>"
 _PROMPT = re.compile(r"(?:[$#>%]|\$\)|psftp>)\s?\Z")
@@ -35,6 +42,7 @@ class InteractiveSession:
     metadata: dict[str, Any] = field(default_factory=dict)
     last_activity: float = field(default_factory=time.time)
 
+    ended_at: float | None = None  # when the process was seen to have exited
     _text: str = ""
     _total_chars: int = 0  # characters ever received
     _last_output: float = 0.0
@@ -118,11 +126,13 @@ class InteractiveSession:
         quiet: float = 2.0,
         expect: re.Pattern[str] | None = None,
         clean: Callable[[str], str] = lambda t: t,
+        pager: re.Pattern[str] | None = None,
     ) -> tuple[str, str]:
         """Wait until output after mark settles. Returns (output, reason).
 
         reason: "expect" (pattern matched), "prompt" (output ends in something
-        that looks like a shell prompt and paused briefly), "quiet" (no new
+        that looks like a shell prompt and paused briefly), "pager" (output
+        ends in a --More-- prompt, only if `pager` is given), "quiet" (no new
         output for `quiet` seconds), "exited" or "timeout".
         """
         deadline = time.time() + max_wait
@@ -137,6 +147,8 @@ class InteractiveSession:
                 last = self._last_output
             if expect is None and out:
                 idle = time.time() - last
+                if idle >= 0.2 and pager is not None and pager.search(clean(out)):
+                    return out, "pager"
                 if idle >= 0.3 and _PROMPT.search(clean(out)):
                     return out, "prompt"
                 if idle >= quiet:
@@ -152,7 +164,14 @@ class InteractiveSession:
 
     @property
     def alive(self) -> bool:
-        return self.process.poll() is None
+        alive = self.process.poll() is None
+        if not alive and self.ended_at is None:
+            self.ended_at = time.time()
+        return alive
+
+    @property
+    def exit_code(self) -> int | None:
+        return self.process.poll()
 
     @property
     def age_seconds(self) -> float:
@@ -204,9 +223,8 @@ class SessionManager:
     ) -> InteractiveSession:
         """Register a new interactive session."""
         with self._lock:
-            # Cleanup dead sessions first
             self._reap_dead()
-            if len(self._sessions) >= self.max_concurrent:
+            if sum(1 for s in self._sessions.values() if s.alive) >= self.max_concurrent:
                 raise RuntimeError(
                     f"Maximum concurrent sessions ({self.max_concurrent}) reached. "
                     f"Close an existing session first."
@@ -228,9 +246,14 @@ class SessionManager:
 
     def get(self, session_id: str) -> InteractiveSession:
         with self._lock:
-            if session_id not in self._sessions:
-                raise KeyError(f"Session '{session_id}' not found")
-            return self._sessions[session_id]
+            if session_id in self._sessions:
+                return self._sessions[session_id]
+            known = ", ".join(self._sessions) or "none"
+        raise KeyError(
+            f"Session '{session_id}' not found. Known sessions: {known}. Sessions live in this "
+            f"server process only (PID {os.getpid()}); if the MCP client restarted the server they "
+            "are gone. For several commands on one device, use shell_run (one call, no session id)."
+        )
 
     def close(self, session_id: str) -> bool:
         with self._lock:
@@ -249,6 +272,7 @@ class SessionManager:
                     "host": s.host,
                     "protocol": s.protocol,
                     "alive": s.alive,
+                    **({"exit_code": s.exit_code} if not s.alive else {}),
                     "age_seconds": round(s.age_seconds, 1),
                     "idle_seconds": round(s.idle_seconds, 1),
                     **s.metadata,
@@ -266,8 +290,14 @@ class SessionManager:
         return len(sessions)
 
     def _reap_dead(self) -> None:
-        """Remove sessions whose process has exited (called with lock held)."""
-        dead = [sid for sid, s in self._sessions.items() if not s.alive]
+        """Forget sessions that exited a while ago (called with lock held).
+
+        Recently exited sessions are kept so session_send/read can still
+        report why they ended (e.g. the device closed the connection).
+        """
+        now = time.time()
+        dead = [sid for sid, s in self._sessions.items()
+                if not s.alive and s.ended_at is not None and now - s.ended_at > KEEP_EXITED_SECONDS]
         for sid in dead:
             # Process already exited, so close() only releases the pipes
             self._sessions.pop(sid).close()
@@ -276,10 +306,11 @@ class SessionManager:
         """Periodically close sessions idle for longer than timeout_seconds."""
         while not self._stop_event.wait(60):
             with self._lock:
+                self._reap_dead()
                 timed_out = [
                     sid
                     for sid, s in self._sessions.items()
-                    if s.idle_seconds > self.timeout_seconds
+                    if s.alive and s.idle_seconds > self.timeout_seconds
                 ]
             for sid in timed_out:
                 log.info("Session %s timed out, closing", sid)

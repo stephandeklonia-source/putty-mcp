@@ -89,3 +89,12 @@ def test_chain_through_jump_host(real, sshd):
         "jump_hosts": [f"{user}@127.0.0.1:{sshd['port']}"],
     })
     assert r["stdout"].strip() == "via-jump", r
+
+
+def test_shell_run_real(real, sshd):
+    real.settings_store.update({"allowed_hosts": ["127.0.0.1"],
+                                "trusted_host_keys": {f"127.0.0.1:{sshd['port']}": [sshd["fp"]]}})
+    r = call(real, "shell_run", {**conn(sshd), "commands": ["cd /tmp", "pwd", "echo a; sleep 1; echo b", "false || echo recovered"]})
+    assert r["success"], r
+    assert "/tmp" in r["results"][1]["output"]
+    assert "a" in r["results"][2]["output"] and "b" in r["results"][2]["output"]

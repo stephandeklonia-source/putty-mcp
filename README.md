@@ -1,6 +1,6 @@
 # PuTTY MCP Server
 
-An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants (Claude Code, Claude Desktop, …) the full PuTTY toolchain: SSH, Telnet, serial, SCP/SFTP, port forwarding, jump hosts, key management and PuTTY's saved sessions. It has 30 tools.
+An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants (Claude Code, Claude Desktop, …) the full PuTTY toolchain: SSH, Telnet, serial, SCP/SFTP, port forwarding, jump hosts, key management and PuTTY's saved sessions. It has 31 tools.
 
 You stay in control through a local **dashboard** in your browser:
 - You see every tool call live.
@@ -70,7 +70,7 @@ All runtime settings live here and are saved to `settings.json`:
 | Section | What you set |
 |---|---|
 | Safety | When to ask (only flagged calls, every call, or never), timeout, allowed and blocked hosts (wildcards), allowed local folders, what happens with unknown hosts, local paths, proxy commands and host keys |
-| Command rules | Regex rules that make a command *ask* or *deny*. They come with defaults for `rm -rf`, reboot/shutdown, disk tools, stopping services, firewall, user accounts, `chmod 777`, `crontab -r` and destructive SQL |
+| Command rules | Regex rules that make a command *ask* or *deny*. They come with defaults for `rm -rf`, reboot/shutdown, disk tools, stopping services, firewall, user accounts, `chmod 777`, `crontab -r` and destructive SQL, plus `reload`, `write erase` and interface shutdown, addressing or routing changes on network devices. New default rules only reach an existing `settings.json` when you click *Restore defaults* |
 | Trusted host keys | Fingerprints you trusted, with a button to remove each one |
 | Sessions and output | Max sessions, idle timeout, buffer size, max output sent to the AI, stripping terminal codes |
 | Serial defaults | Baud, data bits, parity, stop bits, flow control |
@@ -93,9 +93,10 @@ Every event is appended to a daily JSONL file: tool calls with their arguments a
 | **Commands** | `plink_exec` | Run a single command on a remote host |
 | | `plink_script` | Run a local script file remotely (`plink -m`); its lines are checked against the command rules |
 | | `plink_tunnel` | Port forwarding (`-L`/`-R`/`-D`) or `-nc` connection |
+| **Shell** | `shell_run` | Run a list of commands in one interactive shell and close it. Use it for network devices (Cisco IOS, …) and configuration blocks. It waits for each prompt, skips `--More--` pages and stops at device errors such as `% Invalid input` |
 | **Sessions** | `session_open` | Open a persistent interactive session (SSH/Telnet/serial/raw) |
 | | `session_send` | Send a command. Returns when the prompt comes back, when `expect` matches, or when output stops |
-| | `session_read` | Read the output buffer |
+| | `session_read` | Read the output buffer (also after the session ended) |
 | | `session_list` | List active sessions |
 | | `session_close` | Close a session |
 | **File transfer** | `pscp_upload` / `pscp_download` | Copy files via pscp |
@@ -118,6 +119,8 @@ Every event is appended to a daily JSONL file: tool calls with their arguments a
 | | `chain_exec` | Run a command via one or more jump hosts (`user@host:port`); trusted keys apply to every hop |
 
 If you leave out `port`, PuTTY picks the protocol's default port (22 for SSH, 23 for Telnet) or the port stored in the loaded saved session.
+
+**Network devices:** Cisco IOS and similar devices run only one command per SSH exec channel, so `plink_exec` with several lines fails with "invalid autocommand". Use `shell_run` for those. It needs no session id, so it keeps working even when the MCP client restarts the server between calls (sessions only live inside one server process).
 
 All connections run in batch mode. Authentication has to work without prompts: use a key file (`key_file`) or Pageant.
 

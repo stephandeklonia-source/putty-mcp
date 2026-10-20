@@ -1,7 +1,7 @@
 """PuTTY MCP Server — full PuTTY toolchain exposed as MCP tools.
 
 Covers: putty.exe, plink, pscp, psftp, pageant and native key management.
-30 tools: GUI launch, command execution, persistent sessions, file
+31 tools: GUI launch, command execution, shell runs, persistent sessions, file
 transfer, keys, saved sessions (registry) and multi-hop SSH.
 
 The local monitor dashboard is the operator's interface: it shows every
@@ -35,12 +35,13 @@ from putty_lib.config import PuTTYConfig
 from putty_lib.executor import PuTTYExecutor
 from putty_lib.monitor import Monitor, OperatorBlocked, kill_process_tree
 from putty_lib.monitor_web import MonitorServer
-from putty_lib.session_manager import InteractiveSession, SessionManager
+from putty_lib.session_manager import PAGER, InteractiveSession, SessionManager
 from putty_lib.settings import Settings, SettingsStore, data_dir
 from putty_lib.utils import (
     build_connection_args,
     build_proxy_chain,
     build_serial_args,
+    clean_pager,
     limit_text,
     strip_ansi,
 )
@@ -424,6 +425,8 @@ def plink_exec(
 ) -> dict:
     """Run a single command on a remote host via plink. Returns stdout/stderr/rc.
 
+    Network devices such as Cisco IOS accept only one command per call;
+    for several commands or configuration blocks use shell_run.
     Unknown host keys are shown to the user in the dashboard to trust or reject.
     """
     args = build_connection_args(
@@ -435,7 +438,11 @@ def plink_exec(
         batch_mode=True,
     )
     args.append(command)
-    return _run_remote("plink", args, host, port, timeout=timeout)
+    result = _run_remote("plink", args, host, port, timeout=timeout)
+    if "invalid autocommand" in (result.get("stdout", "") + result.get("stderr", "")).lower():
+        result["hint"] = ("This device (e.g. Cisco IOS) runs only one command per SSH exec channel. "
+                          "Use shell_run with a list of commands, one per line.")
+    return result
 
 
 @tool()
@@ -590,7 +597,10 @@ def session_send(
     """
     session = sessions.get(session_id)
     if not session.alive:
-        return {"success": False, "error": "Session process has exited", "output": session.peek(4000)}
+        return {"success": False, "alive": False, "exit_code": session.exit_code,
+                "error": "The session has ended (the connection closed). Its last output is included; "
+                         "open a new session or use shell_run.",
+                "output": session.peek(4000)}
     pattern = re.compile(expect, re.M) if expect else None
 
     # Capture only output produced after this command; the buffer itself
@@ -607,6 +617,91 @@ def session_send(
 
 
 @tool()
+def shell_run(
+    host: str,
+    commands: list[str],
+    port: int | None = None,
+    username: str | None = None,
+    protocol: str = "ssh",
+    key_file: str | None = None,
+    session_name: str | None = None,
+    host_keys: list[str] | None = None,
+    use_pageant: bool = True,
+    proxy_command: str | None = None,
+    command_timeout: float = 30.0,
+    quiet_seconds: float = 2.0,
+    error_pattern: str | None = r"^% |\bInvalid input\b|\bIncomplete command\b|\bcommand not found\b",
+    stop_on_error: bool = True,
+) -> dict:
+    """Run several commands in ONE interactive shell, then close it. No session id needed.
+
+    Use this for network devices (Cisco IOS/NX-OS, Juniper, ...) and any
+    multi-step or configuration work, e.g. ["configure terminal",
+    "interface Gi0/1", "description uplink", "end", "write memory"].
+    Each line is sent after the previous one's prompt returns; "--More--"
+    pages are skipped automatically. A confirmation question (e.g.
+    "Destination filename [startup-config]?") is answered by the next line,
+    which may be "" for Enter. Output lines matching error_pattern (Cisco
+    "% Invalid input", ...) mark the command as failed; with stop_on_error
+    the remaining commands are not sent.
+    """
+    if protocol == "serial":
+        raise ToolError("shell_run does not support serial; use session_open")
+    args = build_connection_args(
+        host=host, port=port, username=username, protocol=protocol,
+        key_file=key_file, session_name=session_name, host_keys=host_keys,
+        use_pageant=use_pageant, proxy_command=proxy_command, batch_mode=True,
+    )
+    error_re = re.compile(error_pattern, re.M | re.I) if error_pattern else None
+    session = _open_session("plink", args, host=host, protocol="shell", port=port,
+                            check_hostkey=protocol == "ssh")
+
+    def wait(mark: int) -> tuple[str, str]:
+        # Keep pressing space while the device shows a --More-- pager
+        while True:
+            out, reason = session.wait_for_output(mark, command_timeout, quiet_seconds,
+                                                  clean=strip_ansi, pager=PAGER)
+            if reason != "pager":
+                return out, reason
+            session.send(" ")
+
+    results: list[dict[str, Any]] = []
+    stopped = None
+    try:
+        banner, reason = wait(0)
+        for command in commands:
+            if not session.alive:
+                stopped = "the connection closed"
+                break
+            mark = session.mark()
+            session.send(command + "\n")
+            out, reason = wait(mark)
+            text = clean_pager(strip_ansi(out))
+            failed = bool(error_re and error_re.search(text))
+            results.append({"command": command, "output": text, "finished": reason, "error": failed})
+            if failed and stop_on_error:
+                stopped = f"error after: {command}"
+                break
+        transcript = clean_pager(strip_ansi(session.read()))
+        alive = session.alive
+    finally:
+        sessions.close(session.session_id)
+
+    per_command = max(2000, current().max_output_chars // max(1, len(results)))
+    for r in results:
+        r["output"] = limit_text(r["output"], per_command)
+    return {
+        "success": stopped is None and len(results) == len(commands) and not any(r["error"] for r in results),
+        "completed": len(results),
+        "total": len(commands),
+        "stopped": stopped,
+        "connected": bool(banner) or alive,
+        "results": results,
+        "output": transcript,
+    }
+
+
+@tool()
 def session_read(
     session_id: str,
     last_n: int | None = None,
@@ -614,10 +709,10 @@ def session_read(
 ) -> dict:
     """Read the output buffer of a persistent session (optionally the last N lines)."""
     session = sessions.get(session_id)
-    return {
-        "output": session.read(last_n=last_n, clear=clear),
-        "alive": session.alive,
-    }
+    result = {"output": session.read(last_n=last_n, clear=clear), "alive": session.alive}
+    if not session.alive:
+        result["exit_code"] = session.exit_code
+    return result
 
 
 @tool()

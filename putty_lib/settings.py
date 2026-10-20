@@ -38,6 +38,10 @@ DEFAULT_COMMAND_RULES: list[dict[str, str]] = [
     {"pattern": r"\bchmod\s+(-\S+\s+)*777\b|\bchown\s+-R\b", "action": "ask", "note": "broad permission change"},
     {"pattern": r"\bcrontab\s+-r\b", "action": "ask", "note": "removes crontab"},
     {"pattern": r"\b(drop|truncate)\s+(table|database|schema)\b", "action": "ask", "note": "destructive SQL"},
+    {"pattern": r"^\s*(reload|write\s+erase|erase\s+(startup-config|nvram:|flash:)|format\s+\S+:|delete\s+(/force\s+)?\S*flash:)",
+     "action": "ask", "note": "network device reload / erase"},
+    {"pattern": r"^\s*(no\s+)?(shutdown|switchport\s+mode|ip\s+address|router\s+\w+|crypto\s+key\s+zeroize)\b",
+     "action": "ask", "note": "network device: interface down / addressing / routing"},
     {"pattern": r":\(\)\s*\{\s*:\|:&\s*\};:", "action": "deny", "note": "fork bomb"},
 ]
 

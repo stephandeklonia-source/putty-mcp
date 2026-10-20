@@ -10,7 +10,7 @@ from conftest import call, in_thread
 def test_tools_are_registered(server):
     import asyncio
 
-    assert len(asyncio.run(server.mcp.list_tools())) == 30
+    assert len(asyncio.run(server.mcp.list_tools())) == 31
 
 
 def test_exec_and_output_cleanup(m):
@@ -167,3 +167,54 @@ def test_tunnel_options_come_before_host(m, dash):
     label = [e for e in dash.get("/api/state")["events"]
              if e["kind"] == "process" and e["status"] == "started"][-1]["label"]
     assert label.index("-nc db:5432") < label.index(" web")
+
+
+def test_shell_run_cisco_config_block(m):
+    r = call(m, "shell_run", {"host": "ios-r1", "commands": [
+        "configure terminal", "interface Gi0/1", "description uplink", "end",
+        "show running-config", "copy running-config startup-config", "",
+    ]})
+    assert r["success"] and r["completed"] == r["total"] == 7, r
+    finished = [x["finished"] for x in r["results"]]
+    assert finished[:4] == ["prompt"] * 4
+    assert "R1(config-if)#" in r["results"][1]["output"]
+    # --More-- pages were skipped and cleaned up
+    show = r["results"][4]["output"]
+    assert all(f"line {i}" in show for i in range(9)) and "More" not in show and "\x08" not in show
+    assert "[OK]" in r["results"][6]["output"]
+    # the shell was closed afterwards
+    assert all(s["protocol"] != "shell" for s in call(m, "session_list", {})["sessions"])
+
+
+def test_shell_run_stops_on_device_error(m):
+    r = call(m, "shell_run", {"host": "ios-r1", "commands": ["configure terminal", "bogus command", "end"]})
+    assert r["success"] is False and r["completed"] == 2 and r["stopped"] == "error after: bogus command"
+    assert r["results"][1]["error"]
+    r = call(m, "shell_run", {"host": "ios-r1", "commands": ["bogus", "end"], "stop_on_error": False})
+    assert r["completed"] == 2 and r["success"] is False
+
+
+def test_shell_run_commands_go_through_policy(m, dash):
+    t, box = in_thread(call, m, "shell_run", {"host": "ios-r1", "commands": ["show version", "reload"]})
+    a = dash.answer(False, kind="tool")
+    t.join(10)
+    assert any("network device reload" in r for r in a["details"]["reasons"])
+    assert "Not approved" in str(box["error"])
+
+
+def test_plink_exec_multiline_on_ios_gets_hint(m):
+    r = call(m, "plink_exec", {"host": "ios-r1", "command": "conf t\ninterface Gi0/1\nend"})
+    assert r["success"] is False and "shell_run" in r["hint"]
+
+
+def test_exited_session_is_explained_not_lost(m):
+    sid = call(m, "session_open", {"host": "ios-r1"})["session_id"]
+    call(m, "session_send", {"session_id": sid, "command": "exit"})
+    time.sleep(0.5)
+    r = call(m, "session_send", {"session_id": sid, "command": "show version"})
+    assert r["success"] is False and r["alive"] is False and "ended" in r["error"]
+    # opening another session does not make the ended one disappear
+    call(m, "session_open", {"host": "shell-x"})
+    assert call(m, "session_read", {"session_id": sid})["alive"] is False
+    with pytest.raises(m.ToolError, match="Known sessions:.*shell_run"):
+        call(m, "session_read", {"session_id": "doesnotexist"})
