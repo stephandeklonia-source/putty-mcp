@@ -1,7 +1,7 @@
 """PuTTY MCP Server — full PuTTY toolchain exposed as MCP tools.
 
 Covers: putty.exe, plink, pscp, psftp, pageant and native key management.
-31 tools: GUI launch, command execution, shell runs, persistent sessions, file
+34 tools: GUI launch, command execution, shell runs, reachability checks, CCC Prodigy (ttssh), persistent sessions, file
 transfer, keys, saved sessions (registry) and multi-hop SSH.
 
 The local monitor dashboard is the operator's interface: it shows every
@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # mcp 1.x (FastMCP was renamed to MCPServer in 2.0)
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
     from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
-from putty_lib import __version__, hostkeys, keys, policy, registry
+from putty_lib import __version__, hostkeys, keys, netcheck, policy, registry
 from putty_lib.approvals import HOSTKEY, SECRET, TOOL, ApprovalQueue
 from putty_lib.audit import AuditLog
 from putty_lib.config import PuTTYConfig
@@ -63,6 +63,7 @@ log.info("PuTTY MCP %s", __version__)
 DATA_DIR = data_dir()
 settings_store = SettingsStore(DATA_DIR / "settings.json", seed=config.seed_settings())
 config.set_putty_dir(settings_store.current.putty_dir)
+config.set_tool_path("ttssh", settings_store.current.ttssh_path)
 
 
 def current() -> Settings:
@@ -94,6 +95,8 @@ def _apply_settings(s: Settings) -> None:
     sessions.buffer_lines = s.buffer_lines
     if str(config.executable_path or "") != s.putty_dir:
         config.set_putty_dir(s.putty_dir)
+    if config.tool_paths.get("ttssh", "") != s.ttssh_path:
+        config.set_tool_path("ttssh", s.ttssh_path)
     monitor.note("Settings changed")
 
 
@@ -621,6 +624,67 @@ def session_send(
     }
 
 
+def _run_commands(
+    session: InteractiveSession,
+    commands: list[str],
+    command_timeout: float,
+    quiet_seconds: float,
+    error_re: re.Pattern[str] | None,
+    stop_on_error: bool,
+    banner: str | None = None,
+) -> dict:
+    """Send commands one by one after each prompt, then close the session.
+
+    Shared by shell_run and ttssh_run. banner: output already read while
+    connecting (None = wait for the first prompt here).
+    """
+
+    def wait(mark: int) -> tuple[str, str]:
+        # Keep pressing space while the device shows a --More-- pager
+        while True:
+            out, reason = session.wait_for_output(mark, command_timeout, quiet_seconds,
+                                                  clean=strip_ansi, pager=PAGER)
+            if reason != "pager":
+                return out, reason
+            session.send(" ")
+
+    results: list[dict[str, Any]] = []
+    stopped = None
+    try:
+        if banner is None:
+            banner, _ = wait(0)
+        for command in commands:
+            if not session.alive:
+                stopped = "the connection closed"
+                break
+            mark = session.mark()
+            session.send(command + "\n")
+            out, reason = wait(mark)
+            text = clean_pager(strip_ansi(out))
+            failed = bool(error_re and error_re.search(text))
+            results.append({"command": command, "output": text, "finished": reason, "error": failed})
+            if failed and stop_on_error:
+                stopped = f"error after: {command}"
+                break
+        transcript = clean_pager(strip_ansi(session.read()))
+        alive = session.alive
+    finally:
+        sessions.close(session.session_id)
+
+    per_command = max(2000, current().max_output_chars // max(1, len(results)))
+    for r in results:
+        r["output"] = limit_text(r["output"], per_command)
+    return {
+        "success": stopped is None and len(results) == len(commands) and not any(r["error"] for r in results),
+        "completed": len(results),
+        "total": len(commands),
+        "stopped": stopped,
+        "connected": bool(banner) or alive,
+        "results": results,
+        "output": transcript,
+    }
+
+
 @tool()
 def shell_run(
     host: str,
@@ -661,49 +725,7 @@ def shell_run(
     session = _open_session("plink", args, host=host, protocol="shell", port=port,
                             check_hostkey=protocol == "ssh")
 
-    def wait(mark: int) -> tuple[str, str]:
-        # Keep pressing space while the device shows a --More-- pager
-        while True:
-            out, reason = session.wait_for_output(mark, command_timeout, quiet_seconds,
-                                                  clean=strip_ansi, pager=PAGER)
-            if reason != "pager":
-                return out, reason
-            session.send(" ")
-
-    results: list[dict[str, Any]] = []
-    stopped = None
-    try:
-        banner, reason = wait(0)
-        for command in commands:
-            if not session.alive:
-                stopped = "the connection closed"
-                break
-            mark = session.mark()
-            session.send(command + "\n")
-            out, reason = wait(mark)
-            text = clean_pager(strip_ansi(out))
-            failed = bool(error_re and error_re.search(text))
-            results.append({"command": command, "output": text, "finished": reason, "error": failed})
-            if failed and stop_on_error:
-                stopped = f"error after: {command}"
-                break
-        transcript = clean_pager(strip_ansi(session.read()))
-        alive = session.alive
-    finally:
-        sessions.close(session.session_id)
-
-    per_command = max(2000, current().max_output_chars // max(1, len(results)))
-    for r in results:
-        r["output"] = limit_text(r["output"], per_command)
-    return {
-        "success": stopped is None and len(results) == len(commands) and not any(r["error"] for r in results),
-        "completed": len(results),
-        "total": len(commands),
-        "stopped": stopped,
-        "connected": bool(banner) or alive,
-        "results": results,
-        "output": transcript,
-    }
+    return _run_commands(session, commands, command_timeout, quiet_seconds, error_re, stop_on_error)
 
 
 @tool()
@@ -1190,6 +1212,54 @@ def get_host_key(
     }
 
 
+@tool()
+def net_check(
+    host: str,
+    ports: list[int] | None = None,
+    ping: bool = True,
+    count: int = 3,
+    timeout: float = 3.0,
+) -> dict:
+    """Check from this computer whether a host is reachable, before connecting.
+
+    Resolves the name, tries a TCP connection to each port (default [22];
+    at most 20) and reports open / closed / filtered plus the service banner
+    when it sends one (SSH shows its version), and runs the system ping
+    (ICMP is often blocked by firewalls, so a failed ping alone doesn't mean
+    the host is down).
+    """
+    try:
+        host = netcheck.validate_host(host)
+    except ValueError as e:
+        raise ToolError(str(e)) from None
+    ports = ports or [22]
+    if len(ports) > netcheck.MAX_PORTS:
+        raise ToolError(f"At most {netcheck.MAX_PORTS} ports per check; this is not a port scanner.")
+    if any(not 0 < p < 65536 for p in ports):
+        raise ToolError("Ports must be between 1 and 65535")
+    count = max(1, min(count, netcheck.MAX_PINGS))
+    timeout = max(0.5, min(timeout, 30.0))
+
+    result: dict[str, Any] = {"host": host}
+    try:
+        result["addresses"] = netcheck.resolve(host)
+    except OSError as e:
+        return {**result, "reachable": False, "error": f"Name resolution failed: {e}"}
+
+    result["tcp"] = [netcheck.tcp_check(host, p, timeout) for p in ports]
+    if ping:
+        cmd = netcheck.ping_command(host, count, timeout)
+        run = executor.run_system("ping", cmd, timeout=int(count * (timeout + 1)) + 5)
+        if run["return_code"] == -1 and "not found" in run["stderr"].lower():
+            result["ping"] = {"error": "ping is not available on this computer"}
+        else:
+            result["ping"] = {**netcheck.parse_ping(run["stdout"] + run["stderr"], count),
+                              "output": run["stdout"].strip()}
+    result["reachable"] = any(t["state"] == "open" for t in result["tcp"]) or bool(
+        result.get("ping", {}).get("reachable"))
+    return result
+
+
 # ===================================================================
 # 8. Multi-Hop / ProxyJump (2 tools)
 # ===================================================================
@@ -1250,6 +1320,111 @@ def chain_exec(
     result = _run_remote("plink", args, target_host, target_port, timeout=timeout)
     result["jump_hosts"] = jump_hosts
     return result
+
+
+# ===================================================================
+# 9. CCC Prodigy controllers via TrainTools SSH (2 tools)
+# ===================================================================
+
+# ttssh prints the server key before connecting, e.g.
+# "Host public key SHA-1: e505464061af86523502cba841437ba7a767020e"
+_TTSSH_KEY = re.compile(r"Host public key SHA-1:\s*([0-9A-Fa-f]{40})")
+
+
+def _verify_ttssh_key(session: InteractiveSession, host: str, output: str) -> str:
+    """Check the Prodigy's host key against the trusted keys before any command is sent."""
+    m = _TTSSH_KEY.search(strip_ansi(output))
+    if not m:
+        sessions.close(session.session_id)
+        raise ToolError("ttssh did not show the controller's host key, so it can't be verified. "
+                        "Refusing to send commands. Output:\n" + strip_ansi(output)[-1500:])
+    fingerprint = "SHA1:" + m.group(1).lower()
+    key = f"ttssh/{host.lower()}"
+    trusted = current().trusted_host_keys.get(key, [])
+    if fingerprint in trusted:
+        return fingerprint
+    if trusted:
+        sessions.close(session.session_id)
+        monitor.alert(f"HOST KEY MISMATCH for Prodigy {host}: the controller presented {fingerprint}, "
+                      "which differs from the trusted key. The connection was closed.")
+        raise ToolError(f"SECURITY: the host key of Prodigy {host} does not match the trusted key. "
+                        "The connection was closed. Do not retry; tell the user.")
+    if current().unknown_host_key_action == "deny":
+        sessions.close(session.session_id)
+        raise ToolError(f"The host key of Prodigy {host} is unknown and was not accepted. The user can "
+                        "trust it in the PuTTY MCP dashboard.")
+    approval = approvals.request(
+        HOSTKEY, f"Unknown Prodigy host key for {host}",
+        {"host": host, "port": 22, "key": "CCC Prodigy (TrainTools SSH), SHA-1 fingerprint",
+         "fingerprint": fingerprint},
+        timeout=current().approval_timeout_seconds,
+    )
+    if not approval.approved:
+        sessions.close(session.session_id)
+        raise ToolError(f"The operator did not trust the host key of Prodigy {host} ({approval.reason}).")
+
+    def add(st: Settings) -> None:
+        st.trusted_host_keys.setdefault(key, []).append(fingerprint)
+
+    settings_store.mutate(add)
+    return fingerprint
+
+
+def _open_ttssh(host: str, connect_timeout: float) -> tuple[InteractiveSession, str]:
+    """Start ttssh, wait for its ">" prompt and verify the host key."""
+    try:
+        host = netcheck.validate_host(host)
+    except ValueError as e:
+        raise ToolError(str(e)) from None
+    session = _open_session("ttssh", [host], host=host, protocol="ttssh", check_hostkey=False)
+    banner, reason = session.wait_for_output(0, connect_timeout, 3.0, clean=strip_ansi)
+    if reason not in ("prompt", "quiet") or not session.alive:
+        sessions.close(session.session_id)
+        hint = ""
+        if reason == "exited" and "Connected to" not in banner:
+            hint = (" If ttssh works in a normal CMD window, it may not accept input from a pipe; "
+                    "test with: echo help | ttssh " + host)
+        raise ToolError(f"ttssh did not reach its prompt ({reason}).{hint} Output:\n"
+                        + strip_ansi(banner)[-1500:])
+    _verify_ttssh_key(session, host, banner)
+    return session, banner
+
+
+@tool()
+def ttssh_run(
+    host: str,
+    commands: list[str],
+    connect_timeout: float = 30.0,
+    command_timeout: float = 30.0,
+    quiet_seconds: float = 2.0,
+    error_pattern: str | None = None,
+    stop_on_error: bool = True,
+) -> dict:
+    """Run commands on a CCC Prodigy controller with TrainTools SSH (ttssh), then disconnect.
+
+    ttssh logs in by itself and shows a ">" prompt; each command is sent after
+    the previous one's prompt returns. The controller's SHA-1 host key is
+    verified against the keys the user trusted in the dashboard before any
+    command is sent. By default the user approves every Prodigy command.
+    error_pattern: optional regex marking a command as failed (stops the rest
+    when stop_on_error).
+    """
+    error_re = re.compile(error_pattern, re.M | re.I) if error_pattern else None
+    session, banner = _open_ttssh(host, connect_timeout)
+    return _run_commands(session, commands, command_timeout, quiet_seconds, error_re, stop_on_error,
+                         banner=banner)
+
+
+@tool()
+def ttssh_open(host: str, connect_timeout: float = 30.0) -> dict:
+    """Open a persistent TrainTools SSH session to a CCC Prodigy controller. Returns session_id.
+
+    Use session_send / session_read / session_close with it. Prefer ttssh_run
+    for a known list of commands (one call, no session id to keep).
+    """
+    session, banner = _open_ttssh(host, connect_timeout)
+    return {"session_id": session.session_id, "host": host, "protocol": "ttssh", "success": True,
+            "output": strip_ansi(banner)}
 
 
 # ===================================================================

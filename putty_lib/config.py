@@ -19,8 +19,9 @@ except ModuleNotFoundError:
 
 
 EXECUTABLES = ["putty", "plink", "pscp", "psftp", "pageant", "puttygen"]
-# Resolved from PATH, not the PuTTY install dir (pageant_list uses ssh-add)
-SYSTEM_EXECUTABLES = ["ssh-add"]
+# Resolved from PATH, not the PuTTY install dir: ssh-add (pageant_list) and
+# CCC's TrainTools SSH utility for Prodigy controllers (ttssh_* tools)
+SYSTEM_EXECUTABLES = ["ssh-add", "ttssh"]
 
 # Common install locations on Windows
 _COMMON_DIRS = [
@@ -67,6 +68,8 @@ class PuTTYConfig:
 
     # Resolved paths for each executable
     exe_paths: dict[str, Path] = field(default_factory=dict)
+    # Per-tool paths from the dashboard settings (e.g. "ttssh")
+    tool_paths: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._resolve_executables()
@@ -133,6 +136,11 @@ class PuTTYConfig:
             "open_browser": self.monitor.open_browser,
         }
 
+    def set_tool_path(self, tool: str, path: str) -> None:
+        """Use an explicit executable path for a system tool (empty = PATH)."""
+        self.tool_paths[tool] = path
+        self._resolve_executables()
+
     def set_putty_dir(self, putty_dir: str) -> None:
         """Change the PuTTY directory at runtime and re-detect executables."""
         self.executable_path = Path(putty_dir) if putty_dir else None
@@ -156,10 +164,15 @@ class PuTTYConfig:
 
         # System executables (not part of PuTTY install)
         for name in SYSTEM_EXECUTABLES:
-            exe_name = f"{name}.exe" if sys.platform == "win32" else name
-            found = shutil.which(exe_name)
+            # shutil.which honours PATHEXT on Windows (.exe, .cmd, ...)
+            found = shutil.which(name)
             if found:
                 self.exe_paths[name] = Path(found)
+
+        # Explicit paths set in the dashboard win over PATH
+        for name, path in self.tool_paths.items():
+            if path and Path(path).is_file():
+                self.exe_paths[name] = Path(path)
 
     def _find_base_dir(self) -> Path | None:
         # 1. Explicit config

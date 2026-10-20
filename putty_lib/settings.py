@@ -42,6 +42,8 @@ DEFAULT_COMMAND_RULES: list[dict[str, str]] = [
      "action": "ask", "note": "network device reload / erase"},
     {"pattern": r"^\s*(no\s+)?(shutdown|switchport\s+mode|ip\s+address|router\s+\w+|crypto\s+key\s+zeroize)\b",
      "action": "ask", "note": "network device: interface down / addressing / routing"},
+    {"pattern": r"^\s*(update|reset|wmrst|restart|reboot|flash|format|cpld|mfg|tpm|load|unload|netload|run|shell|sshshell)\b",
+     "action": "ask", "note": "Prodigy: firmware / restart / load / raw shell"},
     {"pattern": r":\(\)\s*\{\s*:\|:&\s*\};:", "action": "deny", "note": "fork bomb"},
 ]
 
@@ -91,6 +93,10 @@ class Settings:
     serial_stop_bits: int = 1
     serial_flow_control: str = "N"
 
+    # CCC Prodigy controllers via TrainTools SSH (ttssh)
+    ttssh_path: str = ""  # empty = find ttssh on PATH
+    ttssh_approval: str = "every_command"  # "readonly_auto" or "rules"
+
     # Dashboard and audit
     open_browser: str = "first_call"
     audit_enabled: bool = True
@@ -136,6 +142,7 @@ def _validate(data: dict[str, Any], base: Settings) -> Settings:
         "proxy_command_action": ACTIONS,
         "unknown_host_key_action": ("ask", "deny"),
         "open_browser": OPEN_BROWSER,
+        "ttssh_approval": ("every_command", "readonly_auto", "rules"),
     }
     for key, allowed in choices.items():
         if getattr(out, key) not in allowed:

@@ -6,6 +6,20 @@ Versions use the format **YYYY.MM.rev**: the year, the month and a three-digit r
 
 pip writes versions without leading zeros (`2026.10.1`); the dashboard and this file show `2026.10.001`.
 
+## 2026.10.003
+
+- Support for CCC Prodigy controllers through CCC's TrainTools SSH utility (`ttssh`).
+  - New tools `ttssh_run` (a list of commands in one call) and `ttssh_open` (a session to use with `session_send`).
+  - The controller's SHA-1 host key is checked against your trusted keys before any command is sent. An unknown key is shown in the dashboard to trust; a changed key closes the connection and raises an alert.
+  - By default every Prodigy command waits for your approval. *Settings → CCC Prodigy* offers "read-only commands without asking" (`ver`, `ls`, `cat`, `df`, `ping`, …; `date`, `clock` and `rtc` only without arguments) or "only the command rules".
+  - A new default command rule asks for approval before Prodigy firmware, restart, load and raw-shell commands (`update`, `reset`, `restart`, `reboot`, `flash`, `format`, `cpld`, `shell`, …).
+  - The path to `ttssh` can be set in the dashboard; otherwise it is found on PATH.
+- `shell_run` and `ttssh_run` share the same command loop.
+
+## 2026.10.002
+
+- New tool `net_check`: checks from this computer whether a host is reachable. It resolves the name, tries TCP connections to up to 20 ports (open / closed / filtered, plus the SSH version banner) and runs the system ping, whose output is read in any language. It is not a port scanner: one host, at most 20 ports.
+
 ## 2026.10.001
 
 - Versions switch to the YYYY.MM.rev format.

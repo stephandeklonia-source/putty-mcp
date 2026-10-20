@@ -58,7 +58,13 @@ class PuTTYExecutor:
             {"stdout": str, "stderr": str, "return_code": int, "success": bool}
             plus "killed_by_operator": True if the kill switch ended it.
         """
-        prefix = self.config.command_for(tool)
+        return self._run(tool, self.config.command_for(tool), args, input_text, timeout)
+
+    def run_system(self, label: str, cmd: list[str], timeout: int = 30) -> dict:
+        """Run a system command (e.g. ping) with the same tracking and kill switch."""
+        return self._run(label, cmd[:1], cmd[1:], None, timeout)
+
+    def _run(self, tool: str, prefix: list[str], args: list[str], input_text: str | None, timeout: int) -> dict:
         cmd = prefix + args
         log.info("run: %s", loggable(prefix, args))
 
