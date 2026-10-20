@@ -10,7 +10,7 @@ from conftest import call, in_thread
 def test_tools_are_registered(server):
     import asyncio
 
-    assert len(asyncio.run(server.mcp.list_tools())) == 31
+    assert len(asyncio.run(server.mcp.list_tools())) == 32
 
 
 def test_exec_and_output_cleanup(m):
@@ -265,3 +265,53 @@ def test_second_server_cannot_share_the_port(m, tmp_path):
             second.httpd.server_close()
     finally:
         first.httpd.server_close()
+
+
+def test_net_check_tcp_banner_closed_port_and_ping(m):
+    import shutil
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    open_port = srv.getsockname()[1]
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.sendall(b"SSH-2.0-OpenSSH_9.6 Prodigy-test\r\n")
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+
+    r = call(m, "net_check", {"host": "127.0.0.1", "ports": [open_port, closed_port], "count": 1})
+    srv.close()
+    tcp = {t["port"]: t for t in r["tcp"]}
+    assert tcp[open_port]["state"] == "open" and tcp[open_port]["banner"].startswith("SSH-2.0-OpenSSH_9.6")
+    assert tcp[closed_port]["state"] == "closed"
+    assert r["reachable"]
+    if shutil.which("ping"):
+        assert "received" in r["ping"]
+    else:
+        assert "not available" in r["ping"]["error"]
+
+
+def test_net_check_rejects_bad_input(m):
+    with pytest.raises(m.ToolError, match="Not a valid host"):
+        call(m, "net_check", {"host": "-c 1000 example.com"})
+    with pytest.raises(m.ToolError, match="not a port scanner"):
+        call(m, "net_check", {"host": "127.0.0.1", "ports": list(range(1, 30))})
+    r = call(m, "net_check", {"host": "no-such-host.invalid", "ping": False})
+    assert r["reachable"] is False and "resolution failed" in r["error"]
+
+
+def test_net_check_respects_host_policy(m, dash):
+    m.settings_store.update({"allowed_hosts": []})
+    t, box = in_thread(call, m, "net_check", {"host": "127.0.0.1", "ping": False, "ports": [9]})
+    a = dash.answer(False, kind="tool")
+    t.join(10)
+    assert "not on the allowed list" in a["details"]["reasons"][0]

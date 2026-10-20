@@ -1,7 +1,7 @@
 """PuTTY MCP Server — full PuTTY toolchain exposed as MCP tools.
 
 Covers: putty.exe, plink, pscp, psftp, pageant and native key management.
-31 tools: GUI launch, command execution, shell runs, persistent sessions, file
+32 tools: GUI launch, command execution, shell runs, reachability checks, persistent sessions, file
 transfer, keys, saved sessions (registry) and multi-hop SSH.
 
 The local monitor dashboard is the operator's interface: it shows every
@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # mcp 1.x (FastMCP was renamed to MCPServer in 2.0)
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
     from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
-from putty_lib import __version__, hostkeys, keys, policy, registry
+from putty_lib import __version__, hostkeys, keys, netcheck, policy, registry
 from putty_lib.approvals import HOSTKEY, SECRET, TOOL, ApprovalQueue
 from putty_lib.audit import AuditLog
 from putty_lib.config import PuTTYConfig
@@ -1188,6 +1188,54 @@ def get_host_key(
                 else "Host key does not match the trusted key",
         "stderr": result["stderr"],
     }
+
+
+@tool()
+def net_check(
+    host: str,
+    ports: list[int] | None = None,
+    ping: bool = True,
+    count: int = 3,
+    timeout: float = 3.0,
+) -> dict:
+    """Check from this computer whether a host is reachable, before connecting.
+
+    Resolves the name, tries a TCP connection to each port (default [22];
+    at most 20) and reports open / closed / filtered plus the service banner
+    when it sends one (SSH shows its version), and runs the system ping
+    (ICMP is often blocked by firewalls, so a failed ping alone doesn't mean
+    the host is down).
+    """
+    try:
+        host = netcheck.validate_host(host)
+    except ValueError as e:
+        raise ToolError(str(e)) from None
+    ports = ports or [22]
+    if len(ports) > netcheck.MAX_PORTS:
+        raise ToolError(f"At most {netcheck.MAX_PORTS} ports per check; this is not a port scanner.")
+    if any(not 0 < p < 65536 for p in ports):
+        raise ToolError("Ports must be between 1 and 65535")
+    count = max(1, min(count, netcheck.MAX_PINGS))
+    timeout = max(0.5, min(timeout, 30.0))
+
+    result: dict[str, Any] = {"host": host}
+    try:
+        result["addresses"] = netcheck.resolve(host)
+    except OSError as e:
+        return {**result, "reachable": False, "error": f"Name resolution failed: {e}"}
+
+    result["tcp"] = [netcheck.tcp_check(host, p, timeout) for p in ports]
+    if ping:
+        cmd = netcheck.ping_command(host, count, timeout)
+        run = executor.run_system("ping", cmd, timeout=int(count * (timeout + 1)) + 5)
+        if run["return_code"] == -1 and "not found" in run["stderr"].lower():
+            result["ping"] = {"error": "ping is not available on this computer"}
+        else:
+            result["ping"] = {**netcheck.parse_ping(run["stdout"] + run["stderr"], count),
+                              "output": run["stdout"].strip()}
+    result["reachable"] = any(t["state"] == "open" for t in result["tcp"]) or bool(
+        result.get("ping", {}).get("reachable"))
+    return result
 
 
 # ===================================================================

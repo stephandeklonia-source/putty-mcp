@@ -45,3 +45,22 @@ def test_limit_text_keeps_head_and_tail():
     out = limit_text(text, 1000)
     assert out.startswith("a" * 600) and out.endswith("b" * 300) and "omitted" in out
     assert limit_text("short", 1000) == "short"
+
+
+def test_parse_ping_dutch_windows_and_linux():
+    from putty_lib.netcheck import parse_ping
+
+    dutch = (
+        "Antwoord van 10.0.0.1: bytes=32 tijd=2ms TTL=64\n"
+        "Antwoord van 10.0.0.5: Doelhost onbereikbaar.\n"
+        "Antwoord van 10.0.0.1: bytes=32 tijd<1ms TTL=64\n"
+        "    Pakketten: verzonden = 3, ontvangen = 2, verloren = 1 (33% verlies),\n"
+        "    Minimum = 0ms, Maximum = 2ms, Gemiddeld = 1ms\n"
+    )
+    r = parse_ping(dutch, 3)
+    assert r["received"] == 2 and r["loss_percent"] == 33.0 and r["max_ms"] == 2.0
+    linux = ("64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.045 ms\n"
+             "1 packets transmitted, 1 received, 0% packet loss, time 0ms\n")
+    r = parse_ping(linux, 1)
+    assert r["received"] == 1 and r["loss_percent"] == 0.0 and r["min_ms"] == r["max_ms"] == 0.045
+    assert parse_ping("Request timed out.\n", 1)["reachable"] is False

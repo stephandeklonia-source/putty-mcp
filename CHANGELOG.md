@@ -6,6 +6,10 @@ Versions use the format **YYYY.MM.rev**: the year, the month and a three-digit r
 
 pip writes versions without leading zeros (`2026.10.1`); the dashboard and this file show `2026.10.001`.
 
+## 2026.10.002
+
+- New tool `net_check`: checks from this computer whether a host is reachable. It resolves the name, tries TCP connections to up to 20 ports (open / closed / filtered, plus the SSH version banner) and runs the system ping, whose output is read in any language. It is not a port scanner: one host, at most 20 ports.
+
 ## 2026.10.001
 
 - Versions switch to the YYYY.MM.rev format.
