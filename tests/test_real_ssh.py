@@ -35,9 +35,23 @@ def sshd(tmp_path_factory):
         f"AuthorizedKeysFile {d / 'authorized_keys'}\nPasswordAuthentication no\n"
         "KbdInteractiveAuthentication no\nStrictModes no\nUsePAM no\nPermitRootLogin yes\n"
     )
-    os.makedirs("/run/sshd", exist_ok=True)
+    if not os.path.isdir("/run/sshd"):
+        try:
+            os.makedirs("/run/sshd")
+        except OSError as e:
+            pytest.fail(f"sshd needs /run/sshd (create it with: sudo mkdir -p /run/sshd): {e}")
     proc = subprocess.Popen([SSHD, "-D", "-f", str(d / "sshd_config"), "-E", str(d / "log")])
-    time.sleep(1)
+    deadline = time.time() + 10
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            break
+        except OSError:
+            if proc.poll() is not None or time.time() > deadline:
+                log = (d / "log").read_text() if (d / "log").exists() else ""
+                proc.kill()
+                pytest.fail(f"sshd did not start:\n{log}")
+            time.sleep(0.1)
     fp = subprocess.run(["ssh-keygen", "-lf", str(d / "hostkey.pub")], capture_output=True, text=True).stdout.split()[1]
     yield {"port": port, "key": str(d / "client.ppk"), "fp": fp, "dir": d}
     proc.terminate()

@@ -36,7 +36,10 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install PuTTY tools and OpenSSH server (real SSH tests)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y putty-tools openssh-server
+        run: |
+          sudo apt-get update && sudo apt-get install -y putty-tools openssh-server
+          # sshd needs its privilege-separation directory; the tests run unprivileged
+          sudo mkdir -p /run/sshd
       - name: Install package
         shell: bash
         run: |
