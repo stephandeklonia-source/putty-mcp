@@ -37,6 +37,8 @@ Add the server to your MCP client, for example in `~/.claude.json` or the Claude
 }
 ```
 
+**Updating on Windows:** double-click `update.bat` in the project folder. It waits until Claude is closed, then pulls the latest code, reinstalls and shows the new version.
+
 If you'd rather not install it, use `"command": "python", "args": ["C:/path/to/putty-mcp/putty_mcp.py"]` after `pip install -r requirements.txt`.
 
 The server works with `mcp` 1.25+ and 2.x. 2.x is recommended: it runs tool calls in parallel, while 1.x runs them one at a time. To upgrade, use the same Python that your MCP client starts:

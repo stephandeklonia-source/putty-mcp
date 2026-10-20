@@ -6,6 +6,15 @@ Versions use the format **YYYY.MM.rev**: the year, the month and a three-digit r
 
 pip writes versions without leading zeros (`2026.10.1`); the dashboard and this file show `2026.10.001`.
 
+## 2026.10.006
+
+- New `update.bat` (Windows) runs the update in one go. Double-click it in the project folder. It:
+  1. waits until Claude is closed, so a running server can't lock files;
+  2. stops leftover `putty-mcp.exe` processes;
+  3. removes the broken `~utty-mcp` leftovers of an interrupted update;
+  4. runs `git pull` and `pip install --upgrade .`;
+  5. shows the installed version.
+
 ## 2026.10.005
 
 - Long output is no longer lost.
