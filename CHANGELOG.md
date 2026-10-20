@@ -6,6 +6,16 @@ Versions use the format **YYYY.MM.rev**: the year, the month and a three-digit r
 
 pip writes versions without leading zeros (`2026.10.1`); the dashboard and this file show `2026.10.001`.
 
+## 2026.10.005
+
+- Long output is no longer lost.
+  - **Fix:** command output from `shell_run`, `ttssh_run` and `session_send` is captured in full. It used to be read from the rolling session buffer (1000 lines), so the start of long output such as a Prodigy `debug` log could already be gone.
+  - When output is cut for the AI, the full text is kept, and the marker says how to read it. The new tool `output_read` pages through it (`offset`, `length`) or searches it (`grep`, with context lines and offsets).
+- Sessions.
+  - Sessions that never received a command are closed after 10 minutes (tunnels excepted). This cleans up after an open call whose result never reached the client.
+  - The open tools tell the AI to look in `session_list` if their result doesn't arrive.
+- The dashboard header shows the installed mcp version, to help diagnose client problems.
+
 ## 2026.10.004
 
 - "Never ask for approval" is now always temporary. You choose 5 minutes to 8 hours; afterwards the server asks again in the mode you had before.

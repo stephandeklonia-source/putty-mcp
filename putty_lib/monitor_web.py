@@ -42,6 +42,13 @@ log = logging.getLogger(__name__)
 
 _PAGE = Path(__file__).with_name("monitor.html")
 _MAX_BODY = 1_000_000
+try:
+    from importlib.metadata import version as _pkg_version
+
+    _MCP_VERSION = _pkg_version("mcp")
+except Exception:  # noqa: BLE001 - informational only
+    _MCP_VERSION = "?"
+
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,}$")
 
 _INVALID_TOKEN_PAGE = b"""<!doctype html><meta charset="utf-8"><title>PuTTY MCP</title>
@@ -244,6 +251,7 @@ def _make_handler(server: MonitorServer) -> type[BaseHTTPRequestHandler]:
                 state["approvals"] = server.approvals.pending()
                 state["version"] = __version__
                 state["now"] = time.time()
+                state["mcp_version"] = _MCP_VERSION
                 current = server.settings.current
                 state["approvals_paused_until"] = current.approval_off_until if current.approval_mode == "off" else None
                 state["approval_mode_after_pause"] = current.approval_mode_before_off

@@ -1,6 +1,6 @@
 # PuTTY MCP Server
 
-An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants (Claude Code, Claude Desktop, …) the full PuTTY toolchain: SSH, Telnet, serial, SCP/SFTP, port forwarding, jump hosts, key management and PuTTY's saved sessions. It has 34 tools.
+An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants (Claude Code, Claude Desktop, …) the full PuTTY toolchain: SSH, Telnet, serial, SCP/SFTP, port forwarding, jump hosts, key management and PuTTY's saved sessions. It has 35 tools.
 
 You stay in control through a local **dashboard** in your browser:
 - You see every tool call live.
@@ -119,6 +119,7 @@ Every event is appended to a daily JSONL file: tool calls with their arguments a
 | | `saved_session_delete` | Delete a saved session (asks for approval) |
 | **Utility** | `test_connection` | Test an SSH or Telnet connection |
 | | `net_check` | Check from your computer whether a host is reachable: TCP ports (open/closed/filtered, SSH version banner) and ping. Not a port scanner: one host, at most 20 ports |
+| | `output_read` | Read the full text of a long output that was cut for the AI: page with `offset`/`length` or search with `grep` (e.g. `EtherCAT\|IOP`) |
 | | `get_host_key` | Show a server's host key fingerprint without trusting it |
 | **Multi-hop** | `proxy_session` | Interactive session via a custom `-proxycmd` |
 | | `chain_exec` | Run a command via one or more jump hosts (`user@host:port`); trusted keys apply to every hop |

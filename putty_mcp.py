@@ -1,7 +1,7 @@
 """PuTTY MCP Server — full PuTTY toolchain exposed as MCP tools.
 
 Covers: putty.exe, plink, pscp, psftp, pageant and native key management.
-34 tools: GUI launch, command execution, shell runs, reachability checks, CCC Prodigy (ttssh), persistent sessions, file
+35 tools: GUI launch, command execution, shell runs, reachability checks, CCC Prodigy (ttssh), output paging, persistent sessions, file
 transfer, keys, saved sessions (registry) and multi-hop SSH.
 
 The local monitor dashboard is the operator's interface: it shows every
@@ -35,6 +35,7 @@ from putty_lib.config import PuTTYConfig
 from putty_lib.executor import PuTTYExecutor
 from putty_lib.monitor import Monitor, OperatorBlocked, kill_process_tree
 from putty_lib.monitor_web import MonitorServer
+from putty_lib.output_store import OutputStore, grep as grep_output, read_slice
 from putty_lib.session_manager import PAGER, InteractiveSession, SessionManager
 from putty_lib.settings import Settings, SettingsStore, data_dir
 from putty_lib.utils import (
@@ -149,7 +150,18 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 _OUTPUT_KEYS = ("stdout", "stderr", "output")
 
 
-def _for_ai(result: Any) -> Any:
+outputs = OutputStore()
+
+
+def _limit(text: str, max_chars: int, label: str) -> tuple[str, str | None]:
+    """Cap text for the AI; keep the full text in the output store when cut."""
+    if len(text) <= max_chars:
+        return text, None
+    output_id = outputs.put(text, label)
+    return limit_text(text, max_chars, output_id), output_id
+
+
+def _for_ai(result: Any, tool_name: str = "") -> Any:
     """Strip terminal escapes and cap output size before the AI sees it."""
     if not isinstance(result, dict):
         return result
@@ -158,7 +170,9 @@ def _for_ai(result: Any) -> Any:
     for key in _OUTPUT_KEYS:
         if isinstance(out.get(key), str):
             text = strip_ansi(out[key]) if s.strip_ansi else out[key]
-            out[key] = limit_text(text, s.max_output_chars)
+            out[key], output_id = _limit(text, s.max_output_chars, f"{tool_name}.{key}")
+            if output_id:
+                out.setdefault("full_output_ids", {})[key] = output_id
     return out
 
 
@@ -227,7 +241,7 @@ def tool() -> Callable[[_F], _F]:
                     settings_store.mutate(lambda st: policy.apply_remember(st, approval.remember))
 
             try:
-                result = _for_ai(fn(**kwargs))
+                result = _for_ai(fn(**kwargs), name)
             except ToolError as e:
                 raise fail(str(e)) from None
             except Exception as e:
@@ -558,6 +572,7 @@ def session_open(
     Runs in batch mode: authentication must work without prompts (key file or
     Pageant). For serial, host is the port (e.g. COM3) and serial_config is
     "baud,data_bits,parity,stop_bits,flow" (omitted fields use the dashboard defaults).
+    If this result never arrives, call session_list: the session is listed there with its session_id.
     """
     if protocol == "serial":
         s = current()
@@ -616,8 +631,10 @@ def session_send(
     # Capture only output produced after this command; the buffer itself
     # is kept so the monitor dashboard still shows the full history.
     mark = session.mark()
+    session.begin_capture()  # long output may not fit in the rolling buffer
     session.send(command + ("\n" if press_enter else ""))
-    output, reason = session.wait_for_output(mark, wait_seconds, quiet_seconds, pattern, strip_ansi)
+    _, reason = session.wait_for_output(mark, wait_seconds, quiet_seconds, pattern, strip_ansi)
+    output = session.end_capture()
     return {
         "success": True,
         "output": output,
@@ -660,9 +677,10 @@ def _run_commands(
                 stopped = "the connection closed"
                 break
             mark = session.mark()
+            session.begin_capture()  # long output may not fit in the rolling buffer
             session.send(command + "\n")
-            out, reason = wait(mark)
-            text = clean_pager(strip_ansi(out))
+            _, reason = wait(mark)
+            text = clean_pager(strip_ansi(session.end_capture()))
             failed = bool(error_re and error_re.search(text))
             results.append({"command": command, "output": text, "finished": reason, "error": failed})
             if failed and stop_on_error:
@@ -675,7 +693,9 @@ def _run_commands(
 
     per_command = max(2000, current().max_output_chars // max(1, len(results)))
     for r in results:
-        r["output"] = limit_text(r["output"], per_command)
+        r["output"], output_id = _limit(r["output"], per_command, f"command {r['command']!r}")
+        if output_id:
+            r["output_id"] = output_id
     return {
         "success": stopped is None and len(results) == len(commands) and not any(r["error"] for r in results),
         "completed": len(results),
@@ -746,7 +766,7 @@ def session_read(
 
 @tool()
 def session_list() -> dict:
-    """List all active persistent sessions."""
+    """List all persistent sessions of this server (including ones whose open result got lost)."""
     return {"sessions": sessions.list_sessions()}
 
 
@@ -896,7 +916,10 @@ def psftp_interactive(
     host_keys: list[str] | None = None,
     use_pageant: bool = True,
 ) -> dict:
-    """Open a persistent PSFTP session for multi-step SFTP workflows (use session_send). Returns session_id."""
+    """Open a persistent PSFTP session for multi-step SFTP workflows (use session_send). Returns session_id.
+
+    If this result never arrives, call session_list: the session is listed there with its session_id.
+    """
     args = _transfer_args(port, key_file, session_name, host_keys, use_pageant)
     args.append(f"{username}@{host}" if username else host)
 
@@ -1262,6 +1285,37 @@ def net_check(
     return result
 
 
+@tool()
+def output_read(
+    output_id: str,
+    offset: int = 0,
+    length: int = 10000,
+    grep: str | None = None,
+    context_lines: int = 3,
+    max_matches: int = 50,
+) -> dict:
+    """Read the full text of a long tool output that was cut in the middle.
+
+    When a result says "[N characters omitted ... output_read(output_id='o3', ...)]",
+    page through it with offset/length, or pass grep (a case-insensitive regex,
+    e.g. "EtherCAT|IOP|IBS") to get matching lines with context and their
+    offsets. Outputs are kept in memory for the last 30 long results.
+    """
+    try:
+        text, label = outputs.get(output_id)
+    except KeyError as e:
+        raise ToolError(str(e).strip("'\"")) from None
+    limit = current().max_output_chars
+    if grep:
+        try:
+            result = grep_output(text, grep, max(0, min(context_lines, 20)), max(1, min(max_matches, 200)), limit)
+        except re.error as e:
+            raise ToolError(f"Invalid grep pattern: {e}") from None
+    else:
+        result = read_slice(text, offset, max(1, min(length, limit)))
+    return {"output_id": output_id, "source": label, **result}
+
+
 # ===================================================================
 # 8. Multi-Hop / ProxyJump (2 tools)
 # ===================================================================
@@ -1422,7 +1476,9 @@ def ttssh_open(host: str, connect_timeout: float = 30.0) -> dict:
     """Open a persistent TrainTools SSH session to a CCC Prodigy controller. Returns session_id.
 
     Use session_send / session_read / session_close with it. Prefer ttssh_run
-    for a known list of commands (one call, no session id to keep).
+    for a known list of commands (one call, no session id to keep); long output
+    from ttssh_run can be read in parts with output_read.
+    If this result never arrives, call session_list: the session is listed there with its session_id.
     """
     session, banner = _open_ttssh(host, connect_timeout)
     return {"session_id": session.session_id, "host": host, "protocol": "ttssh", "success": True,

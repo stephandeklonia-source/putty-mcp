@@ -522,7 +522,7 @@
     $("status-text").textContent = locked ? "BLOCKED" : "Live";
     $("banner").classList.toggle("show", locked);
     $("lock-btn").textContent = locked ? "Allow tool calls" : "Block new tool calls";
-    $("meta").textContent = `v${state.version} · PID ${state.pid} · up ${fmtAge(state.uptime)}`;
+    $("meta").textContent = `v${state.version} · mcp ${state.mcp_version} · PID ${state.pid} · up ${fmtAge(state.uptime)}`;
     pauseUntil = state.approvals_paused_until;
     pauseNext = state.approval_mode_after_pause;
     clockOffset = state.now - Date.now() / 1000;

@@ -64,3 +64,18 @@ def test_parse_ping_dutch_windows_and_linux():
     r = parse_ping(linux, 1)
     assert r["received"] == 1 and r["loss_percent"] == 0.0 and r["min_ms"] == r["max_ms"] == 0.045
     assert parse_ping("Request timed out.\n", 1)["reachable"] is False
+
+
+def test_output_store_and_grep():
+    from putty_lib.output_store import OutputStore, grep, read_slice
+
+    store = OutputStore(max_items=2)
+    a = store.put("one", "a")
+    store.put("two", "b")
+    store.put("three", "c")
+    with pytest.raises(KeyError):
+        store.get(a)  # oldest dropped
+    text = "".join(f"line {i}\n" for i in range(100)) + "EtherCAT slave IOP\n"
+    r = grep(text, "ethercat", 1, 10, 10_000)
+    assert r["matches"] == 1 and r["results"][0]["line"] == 101 and "line 99" in r["results"][0]["text"]
+    assert read_slice(text, r["results"][0]["offset"], 8)["text"] == "EtherCAT"

@@ -38,6 +38,12 @@ while True:
     buf = b""
     if cmd == "help":
         out("\n\nCommands:\n\tver\n\tls\n\treboot\n\tdate\n\n>")
+    elif cmd == "debug":
+        lines = [f"[{i:05d}] boot: init subsystem {i}\n" for i in range(1500)]
+        lines[700:700] = ["[00700] EtherCAT: bus scan started\n",
+                          "[00701] EtherCAT: slave 1 IOP-16DI found\n",
+                          "[00702] EtherCAT: slave 2 IBS-8AO found\n"]
+        out("\n" + "".join(lines) + ">")
     elif cmd == "ver":
         out("\nProdigy firmware 6.2.1\n>")
     elif cmd.startswith("ls"):

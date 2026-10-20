@@ -10,7 +10,7 @@ from conftest import call, in_thread
 def test_tools_are_registered(server):
     import asyncio
 
-    assert len(asyncio.run(server.mcp.list_tools())) == 34
+    assert len(asyncio.run(server.mcp.list_tools())) == 35
 
 
 def test_exec_and_output_cleanup(m):
@@ -402,3 +402,41 @@ def test_approval_pause_expires_by_itself(m, dash):
     t.join(10)
     assert box["value"]["success"] and m.current().approval_mode == "risky"
     assert any("pause ended" in (e.get("message") or "") for e in dash.get("/api/state")["events"])
+
+
+def test_long_output_can_be_read_in_parts(m):
+    import hashlib
+
+    host = "prodigy-debug"
+    m.settings_store.update({"ttssh_approval": "rules", "trusted_host_keys": {
+        f"ttssh/{host}": ["SHA1:" + hashlib.sha1(host.encode()).hexdigest()]}})
+    r = call(m, "ttssh_run", {"host": host, "commands": ["debug"]})
+    cmd = r["results"][0]
+    assert "[00000] boot" in cmd["output"]  # the start is kept (not lost to the rolling buffer)
+    assert "EtherCAT" not in cmd["output"]  # the middle was cut ...
+    assert "output_read(output_id=" in cmd["output"] and cmd["output_id"]
+    # ... but the full text can be searched
+    found = call(m, "output_read", {"output_id": cmd["output_id"], "grep": "EtherCAT|IOP|IBS", "context_lines": 1})
+    assert found["matches"] == 3 and "IOP-16DI" in found["results"][1]["text"]
+    # and paged through from an offset
+    page = call(m, "output_read", {"output_id": cmd["output_id"], "offset": found["results"][0]["offset"], "length": 200})
+    assert page["text"].startswith("[00700] EtherCAT: bus scan started") and page["more"]
+    with pytest.raises(m.ToolError, match="not found"):
+        call(m, "output_read", {"output_id": "o999999"})
+
+
+def test_plain_output_also_gets_an_output_id(m):
+    r = call(m, "plink_exec", {"host": "web", "command": "big-output"})
+    oid = r["full_output_ids"]["stdout"]
+    assert call(m, "output_read", {"output_id": oid, "length": 50})["total_chars"] > 100_000
+
+
+def test_never_used_sessions_are_cleaned_up(m, monkeypatch):
+    from putty_lib import session_manager
+
+    sid = call(m, "session_open", {"host": "shell-orphan"})["session_id"]
+    used = call(m, "session_open", {"host": "shell-used"})["session_id"]
+    call(m, "session_send", {"session_id": used, "command": "hi"})
+    monkeypatch.setattr(session_manager, "UNUSED_SESSION_SECONDS", 0)
+    closed = m.sessions.cleanup_once()
+    assert sid in closed and used not in closed
