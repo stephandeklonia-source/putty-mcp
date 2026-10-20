@@ -275,11 +275,17 @@ def clean_pager(text: str) -> str:
     return text.replace("\x08", "")
 
 
-def limit_text(text: str, max_chars: int) -> str:
-    """Keep the start and end of long output, dropping the middle."""
+def limit_text(text: str, max_chars: int, output_id: str | None = None) -> str:
+    """Keep the start and end of long output, dropping the middle.
+
+    output_id: where the full text is stored; the marker then says how to
+    read the omitted part with output_read.
+    """
     if len(text) <= max_chars:
         return text
     head = max_chars * 2 // 3
     tail = max_chars - head
     dropped = len(text) - head - tail
-    return f"{text[:head]}\n\n… [{dropped} characters omitted — output limit {max_chars}] …\n\n{text[-tail:]}"
+    how = (f" — read it with output_read(output_id='{output_id}', offset={head}) or search it with "
+           f"output_read(output_id='{output_id}', grep='...')") if output_id else ""
+    return f"{text[:head]}\n\n… [{dropped} characters omitted (output limit {max_chars}){how}] …\n\n{text[-tail:]}"

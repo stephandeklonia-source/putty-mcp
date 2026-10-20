@@ -18,6 +18,13 @@ log = logging.getLogger(__name__)
 # How long a session whose process exited stays visible (with its output)
 KEEP_EXITED_SECONDS = 600
 
+# Full output captured per command, independent of the rolling buffer
+MAX_CAPTURE_CHARS = 5_000_000
+
+# Sessions nobody ever sent a command to are closed after this long; this
+# cleans up after an open call whose result never reached the client.
+UNUSED_SESSION_SECONDS = 600
+
 # Pager prompts that wait for a key (Cisco/Juniper/less)
 PAGER = re.compile(r"(?:--\s*More\s*--|<--- More --->|---\(more[^)]*\)---)\s*\Z", re.I)
 
@@ -43,7 +50,10 @@ class InteractiveSession:
     last_activity: float = field(default_factory=time.time)
 
     ended_at: float | None = None  # when the process was seen to have exited
+    used: bool = False  # a command was sent at least once
     _text: str = ""
+    _capture: list[str] | None = None  # full output since begin_capture()
+    _capture_chars: int = 0
     _total_chars: int = 0  # characters ever received
     _last_output: float = 0.0
     _buffer_lines: int = 1000
@@ -80,6 +90,9 @@ class InteractiveSession:
         with self._lock:
             self._text += text
             self._total_chars += len(text)
+            if self._capture is not None and self._capture_chars < MAX_CAPTURE_CHARS:
+                self._capture.append(text)
+                self._capture_chars += len(text)
             self._last_output = time.time()
             if self._text.count("\n") > self._buffer_lines:
                 self._text = "".join(self._text.splitlines(keepends=True)[-self._buffer_lines:])
@@ -93,6 +106,7 @@ class InteractiveSession:
         self.process.stdin.write(text)
         self.process.stdin.flush()
         self.last_activity = time.time()
+        self.used = True
 
     def read(self, last_n: int | None = None, clear: bool = False) -> str:
         """Read the output buffer, optionally only the last N lines and/or clear it."""
@@ -104,6 +118,18 @@ class InteractiveSession:
         if last_n:
             text = "".join(text.splitlines(keepends=True)[-last_n:])
         return text
+
+    def begin_capture(self) -> None:
+        """Record all output from now on, even what the rolling buffer drops."""
+        with self._lock:
+            self._capture = []
+            self._capture_chars = 0
+
+    def end_capture(self) -> str:
+        with self._lock:
+            text = "".join(self._capture or [])
+            self._capture = None
+            return text
 
     def mark(self) -> int:
         """Current output position, for read_since()."""
@@ -303,18 +329,23 @@ class SessionManager:
             self._sessions.pop(sid).close()
 
     def _cleanup_loop(self) -> None:
-        """Periodically close sessions idle for longer than timeout_seconds."""
         while not self._stop_event.wait(60):
-            with self._lock:
-                self._reap_dead()
-                timed_out = [
-                    sid
-                    for sid, s in self._sessions.items()
-                    if s.alive and s.idle_seconds > self.timeout_seconds
-                ]
-            for sid in timed_out:
-                log.info("Session %s timed out, closing", sid)
-                self.close(sid)
+            self.cleanup_once()
+
+    def cleanup_once(self) -> list[str]:
+        """Close idle and never-used sessions; forget long-ended ones. Returns closed ids."""
+        with self._lock:
+            self._reap_dead()
+            timed_out = [
+                sid
+                for sid, s in self._sessions.items()
+                if s.alive and (s.idle_seconds > self.timeout_seconds or (
+                    not s.used and s.protocol != "tunnel" and s.age_seconds > UNUSED_SESSION_SECONDS))
+            ]
+        for sid in timed_out:
+            log.info("Session %s timed out or was never used, closing", sid)
+            self.close(sid)
+        return timed_out
 
     def shutdown(self) -> None:
         """Shut down the manager and all sessions."""

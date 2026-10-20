@@ -19,7 +19,7 @@ ALLOW, ASK, DENY = "allow", "ask", "deny"
 READ_ONLY_TOOLS = {
     "session_list", "session_read", "saved_sessions_list", "saved_session_get",
     "pageant_list", "keygen_fingerprint", "keygen_public_key", "pscp_list",
-    "get_host_key", "test_connection", "net_check",
+    "get_host_key", "test_connection", "net_check", "output_read",
 }
 
 # Tools that change local state worth a second look

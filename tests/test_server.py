@@ -10,7 +10,7 @@ from conftest import call, in_thread
 def test_tools_are_registered(server):
     import asyncio
 
-    assert len(asyncio.run(server.mcp.list_tools())) == 34
+    assert len(asyncio.run(server.mcp.list_tools())) == 35
 
 
 def test_exec_and_output_cleanup(m):
@@ -373,3 +373,70 @@ def test_ttssh_session_and_failures(m, dash):
         call(m, "ttssh_open", {"host": "down", "connect_timeout": 5})
     with pytest.raises(m.ToolError, match="Not a valid host"):
         call(m, "ttssh_run", {"host": "-x 1.2.3.4", "commands": ["ver"]})
+
+
+def test_approval_pause_countdown_and_cancel(m, dash):
+    m.settings_store.update({"allowed_hosts": []})
+    payload = dash.post("/api/settings", {"changes": {"approval_mode": "off", "approval_off_minutes": 5}})
+    assert payload["settings"]["approval_mode"] == "off"
+    state = dash.get("/api/state")
+    assert 4 * 60 < state["approvals_paused_until"] - state["now"] <= 5 * 60
+    # paused: an unknown host runs without asking
+    assert call(m, "plink_exec", {"host": "anyhost", "command": "ls"})["success"]
+    # cancel from the dashboard: asking again immediately
+    assert dash.post("/api/approvals/resume", {})["resumed"]
+    assert dash.get("/api/state")["approvals_paused_until"] is None
+    t, box = in_thread(call, m, "plink_exec", {"host": "otherhost", "command": "ls"})
+    dash.answer(False, kind="tool")
+    t.join(10)
+    assert "Not approved" in str(box["error"])
+
+
+def test_approval_pause_expires_by_itself(m, dash):
+    import time
+
+    m.settings_store.update({"allowed_hosts": [], "approval_mode": "off"})
+    m.settings_store._settings.approval_off_until = time.time() - 1  # time is up
+    t, box = in_thread(call, m, "plink_exec", {"host": "anyhost", "command": "ls"})
+    dash.answer(True, kind="tool")
+    t.join(10)
+    assert box["value"]["success"] and m.current().approval_mode == "risky"
+    assert any("pause ended" in (e.get("message") or "") for e in dash.get("/api/state")["events"])
+
+
+def test_long_output_can_be_read_in_parts(m):
+    import hashlib
+
+    host = "prodigy-debug"
+    m.settings_store.update({"ttssh_approval": "rules", "trusted_host_keys": {
+        f"ttssh/{host}": ["SHA1:" + hashlib.sha1(host.encode()).hexdigest()]}})
+    r = call(m, "ttssh_run", {"host": host, "commands": ["debug"]})
+    cmd = r["results"][0]
+    assert "[00000] boot" in cmd["output"]  # the start is kept (not lost to the rolling buffer)
+    assert "EtherCAT" not in cmd["output"]  # the middle was cut ...
+    assert "output_read(output_id=" in cmd["output"] and cmd["output_id"]
+    # ... but the full text can be searched
+    found = call(m, "output_read", {"output_id": cmd["output_id"], "grep": "EtherCAT|IOP|IBS", "context_lines": 1})
+    assert found["matches"] == 3 and "IOP-16DI" in found["results"][1]["text"]
+    # and paged through from an offset
+    page = call(m, "output_read", {"output_id": cmd["output_id"], "offset": found["results"][0]["offset"], "length": 200})
+    assert page["text"].startswith("[00700] EtherCAT: bus scan started") and page["more"]
+    with pytest.raises(m.ToolError, match="not found"):
+        call(m, "output_read", {"output_id": "o999999"})
+
+
+def test_plain_output_also_gets_an_output_id(m):
+    r = call(m, "plink_exec", {"host": "web", "command": "big-output"})
+    oid = r["full_output_ids"]["stdout"]
+    assert call(m, "output_read", {"output_id": oid, "length": 50})["total_chars"] > 100_000
+
+
+def test_never_used_sessions_are_cleaned_up(m, monkeypatch):
+    from putty_lib import session_manager
+
+    sid = call(m, "session_open", {"host": "shell-orphan"})["session_id"]
+    used = call(m, "session_open", {"host": "shell-used"})["session_id"]
+    call(m, "session_send", {"session_id": used, "command": "hi"})
+    monkeypatch.setattr(session_manager, "UNUSED_SESSION_SECONDS", 0)
+    closed = m.sessions.cleanup_once()
+    assert sid in closed and used not in closed

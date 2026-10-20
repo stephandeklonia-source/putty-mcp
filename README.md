@@ -1,6 +1,6 @@
 # PuTTY MCP Server
 
-An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants (Claude Code, Claude Desktop, …) the full PuTTY toolchain: SSH, Telnet, serial, SCP/SFTP, port forwarding, jump hosts, key management and PuTTY's saved sessions. It has 34 tools.
+An [MCP](https://modelcontextprotocol.io/) server that gives AI assistants (Claude Code, Claude Desktop, …) the full PuTTY toolchain: SSH, Telnet, serial, SCP/SFTP, port forwarding, jump hosts, key management and PuTTY's saved sessions. It has 35 tools.
 
 You stay in control through a local **dashboard** in your browser:
 - You see every tool call live.
@@ -37,6 +37,8 @@ Add the server to your MCP client, for example in `~/.claude.json` or the Claude
 }
 ```
 
+**Updating on Windows:** double-click `update.bat` in the project folder. It waits until Claude is closed, then pulls the latest code, reinstalls and shows the new version.
+
 If you'd rather not install it, use `"command": "python", "args": ["C:/path/to/putty-mcp/putty_mcp.py"]` after `pip install -r requirements.txt`.
 
 The server works with `mcp` 1.25+ and 2.x. 2.x is recommended: it runs tool calls in parallel, while 1.x runs them one at a time. To upgrade, use the same Python that your MCP client starts:
@@ -71,7 +73,7 @@ All runtime settings live here and are saved to `settings.json`:
 
 | Section | What you set |
 |---|---|
-| Safety | When to ask (only flagged calls, every call, or never), timeout, allowed and blocked hosts (wildcards), allowed local folders, what happens with unknown hosts, local paths, proxy commands and host keys |
+| Safety | When to ask (only flagged calls, every call, or never for 5 minutes to 8 hours; a countdown banner with *Ask again now* shows while paused), timeout, allowed and blocked hosts (wildcards), allowed local folders, what happens with unknown hosts, local paths, proxy commands and host keys |
 | Command rules | Regex rules that make a command *ask* or *deny*. They come with defaults for `rm -rf`, reboot/shutdown, disk tools, stopping services, firewall, user accounts, `chmod 777`, `crontab -r` and destructive SQL, plus `reload`, `write erase` and interface shutdown, addressing or routing changes on network devices. New default rules only reach an existing `settings.json` when you click *Restore defaults* |
 | Trusted host keys | Fingerprints you trusted, with a button to remove each one |
 | Sessions and output | Max sessions, idle timeout, buffer size, max output sent to the AI, stripping terminal codes |
@@ -119,6 +121,7 @@ Every event is appended to a daily JSONL file: tool calls with their arguments a
 | | `saved_session_delete` | Delete a saved session (asks for approval) |
 | **Utility** | `test_connection` | Test an SSH or Telnet connection |
 | | `net_check` | Check from your computer whether a host is reachable: TCP ports (open/closed/filtered, SSH version banner) and ping. Not a port scanner: one host, at most 20 ports |
+| | `output_read` | Read the full text of a long output that was cut for the AI: page with `offset`/`length` or search with `grep` (e.g. `EtherCAT\|IOP`) |
 | | `get_host_key` | Show a server's host key fingerprint without trusting it |
 | **Multi-hop** | `proxy_session` | Interactive session via a custom `-proxycmd` |
 | | `chain_exec` | Run a command via one or more jump hosts (`user@host:port`); trusted keys apply to every hop |
